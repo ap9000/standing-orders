@@ -164,7 +164,7 @@ describe("the lead's bundle", () => {
     expect(["Slack", "Discord", "Teams", "Telegram"].map(leadChannelOf)).toEqual(["slack", "discord", "teams", "telegram"]);
     expect(leadChannelOf("Mattermost")).toBeUndefined();
     expect(bundle({ channel: undefined }).channel).toBeNull();
-    expect(MATE_CONTRACT_VERSION).toBe(46);
+    expect(MATE_CONTRACT_VERSION).toBe(47);
     expect(MATE_CONTRACT).toContain("channel: where this conversation is; fit your replies to it");
     // The contract names the flow tools and no longer carries their detail.
     expect(MATE_CONTRACT).toContain("Read get_flows");

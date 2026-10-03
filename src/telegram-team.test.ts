@@ -258,6 +258,23 @@ describe("Telegram team chats", () => {
     expect(script.texts(GROUP)).not.toContain("Do not send after the grant ends");
   });
 
+  test("a long lead reply full of links, bold and & or < is sent in parts Telegram accepts, no link cut", async () => {
+    const script = scripted();
+    script.updates.push([textUpdate(1, priv(SAM.chat), SAM.user, "/team 1")]);
+    await pass(script);
+    const before = script.sends().length;
+    const urls = Array.from({ length: 300 }, (_, index) => `https://docs.example.org/guide/${index}?a=1&b=2`);
+    store.appendMateMessage({ thread, turn: null, role: "assistant", text: urls.map((url, index) => `**Step ${index}** a<b & c: ${url}`).join(" ") }, T0);
+    await pass(script);
+    const sent = script.sends().slice(before).map(call => String(call.params["text"]));
+    expect(sent.length).toBeGreaterThan(1);
+    for (const part of sent) expect(part.length).toBeLessThanOrEqual(4096);
+    const joined = sent.join(" ");
+    for (const url of urls) expect(joined).toContain(`docs.example.org (${url})`);
+    expect(joined).toContain("a<b & c");
+    expect(store.telegramTeamChat(BOT, String(SAM.chat))!.cursor).toBeGreaterThan(0);
+  });
+
   test("delivery rechecks membership between parts and does not advance an unfinished message", async () => {
     const script = scripted();
     script.updates.push([textUpdate(1, priv(SAM.chat), SAM.user, "/team 1")]);

@@ -7,10 +7,11 @@
  * per-chat cursor read on every bridge cycle. No model runs here.
  */
 import type { Store, TelegramBinding, TelegramTeamChat } from "./store.js";
+import { renderReply, shapeReplyParts } from "./reply-shape.js";
 import { TeamLeads } from "./team-leads.js";
 import type { TeamActor, TeamConversation } from "./team-contract.js";
 import { proposalPreview, tooLongText } from "./chat-channel.js";
-import { mintCardTokens, phoneLinkButton, splitParts, type InlineButton } from "./telegram-mate.js";
+import { PART_CAP, mintCardTokens, phoneLinkButton, splitParts, type InlineButton } from "./telegram-mate.js";
 import type { TelegramTransport } from "./telegram.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
 import { phoneText } from "./telegram-status.js";
@@ -261,7 +262,9 @@ export async function deliverTeamChats(
       const skip = role === "operator" && (ownMessage || status === "cancelled" || String(message["author"] ?? "").length === 0);
       const prefix = `telegram-team:${chat.id}:`;
       if (!skip) {
-        const text = role === "assistant" ? String(message["text"]) : `${phoneText(String(message["author"]), 40)}: ${String(message["text"])}`;
+        // The lead's reply is split as written, then each part shaped and measured as Telegram shows it, so no cut lands
+        // inside a link and no rendered part passes Telegram's ceiling.
+        const text = role === "assistant" ? shapeReplyParts(String(message["text"]), PART_CAP, { appOrigin: phoneOrigin?.() ?? null }, shaped => renderReply(shaped, "telegram").length).map(part => renderReply(part, "telegram")) : `${phoneText(String(message["author"]), 40)}: ${String(message["text"])}`;
         const sent = await sendParts(store, transport, chat.chatId, text, `${prefix}message:${id}`, clock, access, report);
         if (sent !== null) { report.problems.push(`team chat ${chat.chatId}: ${sent}`); break; }
       }
@@ -311,10 +314,10 @@ function cardBindingFor(store: Store, botId: string, chat: TelegramTeamChat, tur
 }
 
 async function sendParts(
-  store: Store, transport: TelegramTransport, chatId: string, text: string, receipt: string, clock: () => Date,
+  store: Store, transport: TelegramTransport, chatId: string, text: string | readonly string[], receipt: string, clock: () => Date,
   access: () => Promise<readonly string[] | null>, report: TeamDeliveryReport, keyboard?: InlineButton[][], tokens: string[] = [],
 ): Promise<string | null> {
-  const parts = splitParts(text);
+  const parts = typeof text === "string" ? splitParts(text) : text;
   const delivered = store.serviceCursor(receipt);
   for (const [index, part] of parts.entries()) {
     if (index < delivered) continue;

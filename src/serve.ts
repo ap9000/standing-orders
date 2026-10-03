@@ -289,7 +289,7 @@ import { tally, spendLine, runCostWords } from "./summary.js";
 import { classify, holdOwnerWords, attentionCardForUnverifiedDone } from "./board.js";
 import type { BoardCard } from "./board.js";
 import { approveRoutine, describeSchedule, fireRoutine, parseSchedule, refreshRoutineAgents, routineAgentsState, routineDigestOf, validateRoutineTerms, ROUTINE_NAME, type RoutineTerms } from "./routine.js";
-import { effectivePrimary, isMessagingChannel, savePrimary } from "./webhooks.js";
+import { effectivePrimary, isMessagingChannel, loadConsoleUrl, savePrimary } from "./webhooks.js";
 import { resolvePhaseAgent, resolveRoutineAuthority, INSTALLATION_SCOPE, routeOfTask, agentChoicesFor, type AgentChoice } from "./agentconfig.js";
 import { isRiskLevel, projectRoute, riskTitle, riskConsequence, chosenWords, agentsSummary, postureWords, RISK_CHOICES, RISK_LEVELS, PHASES as ROUTE_PHASES, type PhaseRoute, type RouteProjection, type RouteOverride, type RouteStamp, type RiskLevel } from "./phase-routing.js";
 import { ALL_CREDENTIAL_ENV, isProviderId, reportsCost, PROVIDER_IDS, validModelId, validateSpec, type Phase, type ProviderId } from "./provider.js";
@@ -341,6 +341,7 @@ import { checkTeamsCredentials, clearTeamsCredentials, loadTeamsCredentials, sav
 import type { CoordinatorProposal, MateMessage, MateProposal, MateSession, MateTurn } from "./store.js";
 import { verifyApproverByPassword, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { runMateTurn, MATE_MESSAGE_MAX_CHARS } from "./mate.js";
+import { replyHtmlInline, shapeReply } from "./reply-shape.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { confirmCoordinatorProposal, confirmMateProposal, dismissCoordinatorProposal, dismissMateProposal } from "./mate-doors.js";
 import { envValue } from "./names.js";
@@ -1737,6 +1738,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       actor: who.name,
       csrf: who.via === "cookie" ? who.session.csrf : "",
       returnTo: safeReturn(url.pathname + url.search),
+      // This console's own addresses: a lead reply's links there read as "the task", "the result", "Settings → Lead".
+      appOrigins: [consoleOrigin(request.headers.host), publicOrigin?.origin ?? null, options.configDir === undefined ? null : loadConsoleUrl(process.env, options.configDir)],
       // Every signed-in page shares the workspace shell; pages showing a one-time secret opt out (forceSensitive).
       browser: who.via === 'cookie',
       // v100: signed in with the identity provider: its label, and whether it checked them recently enough to stand in for a password.
@@ -5008,17 +5011,17 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (result.problem.startsWith("status-")) {
         // The provider ANSWERED with an error: nothing billed.
         finish({ state: "failed", failureReason: "provider-error", settledMicrousd: 0 });
-        tell(null, "the provider refused the request — nothing was billed");
+        tell(null, "The chat provider turned the request down. Nothing was kept or charged. Try again in a minute.");
       } else if (result.problem === "timeout") {
         finish({ state: "failed", failureReason: "timeout", settledMicrousd: null, unknownSpend: true });
-        tell(null, "the turn timed out; its cost is unknown and chat is blocked until you acknowledge it");
+        tell(null, "The reply took too long and was stopped, and its cost isn't known yet, so chat is paused. Confirm the cost on this page to turn chat back on.");
       } else if (result.problem === "network") {
         finish({ state: "failed", failureReason: "provider-error", settledMicrousd: null, unknownSpend: true });
-        tell(null, "the provider could not be reached after dispatch; cost unknown — acknowledge to re-enable chat");
+        tell(null, "The chat provider stopped responding partway through, and the cost isn't known, so chat is paused. Confirm the cost on this page to turn chat back on.");
       } else {
         // 200 with an unusable wrapper: billed, amount unproven.
         finish({ state: "failed", failureReason: "malformed-reply", settledMicrousd: null, unknownSpend: true });
-        tell(null, "the provider's response was malformed and was discarded; cost unknown — acknowledge to re-enable chat");
+        tell(null, "The chat provider sent back an answer that couldn't be read, and its cost isn't known, so chat is paused. Confirm the cost on this page to turn chat back on.");
       }
       return;
     }
@@ -17906,14 +17909,13 @@ function chatHeading(copy: string, projectCount: number, showProjectToggle = tru
   );
 }
 
-/** A deliberately small rich-text grammar for model copy. Input is escaped
- * before tags are introduced: headings, bullets, numbered steps, bold, and
- * inline code are presentation only—never executable HTML or external links. */
-function renderChatText(text: string): string {
-  const inline = (value: string): string =>
-    escape(value)
-      .replace(/`([^`\n]{1,240})`/g, "<code>$1</code>")
-      .replace(/\*\*([^*\n]{1,500})\*\*/g, "<strong>$1</strong>");
+/** A deliberately small rich-text grammar for model copy. The reply is shaped first (the lead's voice, enforced:
+ * no headers, at most three bold anchors, labelled links, no internal ids unless `asked` wanted them); input is
+ * escaped before tags are introduced: bullets, numbered steps, bold, inline code and labelled http(s) links are
+ * presentation only—never executable HTML. */
+function renderChatText(raw: string, asked?: string): string {
+  const inline = replyHtmlInline;
+  const text = shapeReply(raw, { appOrigin: requestContext.getStore()?.appOrigins ?? null, ...(asked === undefined ? {} : { asked }) });
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
   const out: string[] = [];
   let paragraph: string[] = [];
@@ -17929,13 +17931,9 @@ function renderChatText(text: string): string {
     list = null;
   };
   for (const line of lines) {
-    const heading = /^(?:#{1,3}\s+)(.+)$/.exec(line);
     const bullet = /^\s*[-*]\s+(.+)$/.exec(line);
     const numbered = /^\s*(\d{1,9})[.)]\s+(.+)$/.exec(line);
-    if (heading !== null) {
-      flushParagraph(); closeList();
-      out.push(`<h3>${inline(heading[1] ?? "")}</h3>`);
-    } else if (bullet !== null || numbered !== null) {
+    if (bullet !== null || numbered !== null) {
       flushParagraph();
       const wanted = bullet !== null ? "ul" : "ol";
       if (list !== wanted) { closeList(); out.push(`<${wanted}>`); list = wanted; }
@@ -18183,8 +18181,8 @@ function chatPage(chrome: Chrome, data: {
   );
   for (const turn of data.latched) {
     parts.push(
-      `<div class="problem"><strong>Unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
-        `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> to re-enable this credential.</div>`,
+      `<div class="problem"><strong>Chat is paused.</strong> An earlier reply stopped before its cost was known; it may have cost up to ${chatMoney(turn.reservedMicrousd)}. ` +
+        `<a href="/chat/ack/${turn.id}">Confirm that cost</a> to turn chat back on.</div>`,
     );
   }
   if (data.pending !== null) {
@@ -18666,9 +18664,12 @@ function mateBrowserMessages(rows: Pick<MateThreadRows, "messages" | "proposals"
     const ask = turn === null ? undefined : rows.asks?.get(turn);
     return ask === undefined ? "" : mateAskHtml(ask, csrf, target, target.task === null ? "lead-message" : "task-message", ask.turn === open);
   };
+  // The owner's message each reply answers: when it asked for ids, the reply keeps them.
+  const askedBy = new Map<number, string>();
+  rows.messages.reduce<string | undefined>((last, message) => { if (message.role === 'operator') return message.text; if (last !== undefined) askedBy.set(message.id, last); return last; }, undefined);
   return rows.messages.map(message => ({
     id: message.id, role: message.role, text: message.text,
-    html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text) + asked(message.turn),
+    html: message.role === 'operator' ? `<p>${escape(message.text)}</p>` : renderChatText(message.text, askedBy.get(message.id)) + asked(message.turn),
     activity: message.activity, createdAt: message.createdAt,
     ...(() => {
       const parts = message.turn === null ? [] : rows.proposals.filter(one => one.turn === message.turn)
@@ -18741,15 +18742,17 @@ function mateThreadHtml(data: MateThreadRows & { csrf: string; now: Date; proble
       `<p class="meta">${data.focusTask === null ? "Describe a task or ask about your projects." : "Ask about progress, review results, or adjust the plan."}</p></div>`,
     );
   }
+  let asked: string | undefined;
   for (const message of data.messages) {
     if (message.role === "operator") {
+      asked = message.text;
       parts.push(`<div class="msg op" data-message-role="operator" data-key="m${message.id}"><p style="white-space:pre-wrap">${escape(message.text)}</p></div>`);
       continue;
     }
     const cards = message.turn === null ? [] : (byTurn.get(message.turn) ?? []);
     parts.push(
       `<div class="msg mate" data-message-role="assistant" data-key="m${message.id}"${message.id === latestReply ? ' id="latest"' : ""}>` +
-        renderChatText(message.text) +
+        renderChatText(message.text, asked) +
         (() => {
           const ask = message.turn === null ? undefined : data.asks?.get(message.turn);
           return ask === undefined ? "" : mateAskHtml(ask, data.csrf, { task: data.focusTask?.id ?? null, project: data.chatProject ?? null }, "chat-message", data.pending === null && data.ask?.turn === ask.turn);
@@ -18830,8 +18833,8 @@ function matePage(chrome: Chrome, data: MateThreadRows & {
   if (data.problem !== null) conversation.push(`<div class="problem">${escape(data.problem)}</div>`);
   for (const turn of data.latched) {
     conversation.push(
-      `<div class="problem"><strong>Unknown spend blocks chat.</strong> turn #${turn.id} may have cost up to ${chatMoney(turn.reservedMicrousd)} — ` +
-        `<a href="/chat/ack/${turn.id}">read and acknowledge it</a> to re-enable this credential.</div>`,
+      `<div class="problem"><strong>Chat is paused.</strong> An earlier reply stopped before its cost was known; it may have cost up to ${chatMoney(turn.reservedMicrousd)}. ` +
+        `<a href="/chat/ack/${turn.id}">Confirm that cost</a> to turn chat back on.</div>`,
     );
   }
   const lastMessage = data.messages.at(-1);
@@ -20537,7 +20540,7 @@ function accentHead(): string {
   const accent = requestContext.getStore()?.accent ?? null;
   return accent === null ? "" : `<style data-accent="${accent}">${accentStyle(accent)}</style>`;
 }
-const requestContext = new AsyncLocalStorage<{ sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; accent?: string | null; updateSeen?: string | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
+const requestContext = new AsyncLocalStorage<{ appOrigins?: readonly (string | null)[]; sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; accent?: string | null; updateSeen?: string | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
 /** The words a result page shows for a refusal its own form led to, by the fixed code a redirect carries. */

@@ -23,12 +23,14 @@ export { channelRepos as telegramConversationRepos, resolveChannelMate as resolv
  * the console and CLI state), and the door re-proves everything again.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { MATE_MESSAGE_MAX_CHARS, runMateTurn } from "./mate.js";
+import { MATE_MESSAGE_MAX_CHARS, mateFailureText, runMateTurn, type MateChannelProblem } from "./mate.js";
 import { confirmMateProposal, dismissMateProposal, type DoorOptions, type DoorOutcome } from "./mate-doors.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import { MATE_ASK_OTHER, type MateAsk, type MateProposal, type Store, type TelegramBinding, type TelegramConversation } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { phoneText } from "./telegram-status.js";
+import { shapeReplyParts, telegramReply } from "./reply-shape.js";
+import { WARM_EMOJI, warmTurn } from "./chat-warmth.js";
 import { TeamLeads } from "./team-leads.js";
 import { chatResultHref } from "./chat-controls.js";
 import { resultImageFileName, safeResultImageCaption, verifyResultImage } from "./chat-evidence.js";
@@ -43,7 +45,7 @@ export const CONVERSATION_MAX_AGE_MS = 10 * 60_000;
 export const CARD_TTL_MS = 24 * 3_600_000;
 export const CHALLENGE_TTL_MS = 10 * 60_000;
 /** Telegram's own message ceiling, with room for our part headers (the same bound telegram.ts splits at). */
-const PART_CAP = 3_900;
+export const PART_CAP = 3_900;
 
 export type TelegramConversationOptions = {
   /** Where evidence lives — the same root the console and CLI read results from. */
@@ -465,7 +467,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     const bound = store.getTelegramConversation(row.id)?.session ?? null;
     const session = bound === null ? null : store.getMateSession(bound);
     if (session === null) {
-      await notify(couldNotAnswerText("the chat session for this reply is gone"));
+      await notify("This conversation was restarted before my reply went out, so it wasn't sent. Nothing was changed. Send your message again.");
       finish({ state: "failed", outcome: "unsent:no-session" });
       report.refused++;
       return;
@@ -569,11 +571,14 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
         const origin = proposal === null ? null : options.phoneOrigin?.() ?? null;
         const wanted = proposal === null ? null : proposalLink(store, proposal, repos);
         const keyboard = keyboardWith(part.keyboard, phoneLinkButton(origin, wanted));
-        const text = proposal !== null && part.keyboard === null ? handoffCardText(part.text, linkNote(origin, wanted)) : part.text;
+        // The lead's own words carry their bold anchors and labelled links as entities, never as Markdown characters.
+        const voiced = part.kind === "reply" ? telegramReply(part.text) : null;
+        const text = proposal !== null && part.keyboard === null ? handoffCardText(part.text, linkNote(origin, wanted)) : voiced?.text ?? part.text;
         method = "sendMessage";
         send = () => transport("sendMessage", {
           chat_id: chatId,
           text,
+          ...(voiced === null || voiced.entities.length === 0 ? {} : { entities: voiced.entities }),
           link_preview_options: { is_disabled: true },
           ...(part.replyTo === null ? {} : { reply_parameters: { message_id: Number(part.replyTo) } }),
           ...(keyboard === undefined ? {} : { reply_markup: { inline_keyboard: keyboard } }),
@@ -628,7 +633,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     try {
       return store.transact(() => {
         const now = clock();
-        const parts: Parameters<Store["planTelegramConversationParts"]>[3][number][] = splitParts(reply).map((text, index) => ({ kind: "reply", text, replyTo: index === 0 ? row.messageId : null }));
+        const parts: Parameters<Store["planTelegramConversationParts"]>[3][number][] = shapeReplyParts(reply, PART_CAP, { asked: row.text, appOrigin: options.phoneOrigin?.() ?? null }, shaped => telegramReply(shaped).text.length).map((text, index) => ({ kind: "reply", text, replyTo: index === 0 ? row.messageId : null }));
         // The lead's question to its owner: one tap per option, then "Something else".
         const ask = store.mateAsk(turn);
         if (ask !== null) parts.push({ kind: "reply", text: phoneText(ask.question, 1_000), keyboard: askKeyboard(ask) });
@@ -660,7 +665,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     store.bindTelegramConversationTurn(row.id, owner, session, turnId);
     if (turn.state === "queued" || turn.state === "running") { await requeue("replayed:running"); return; }
     if (turn.state !== "answered") {
-      await notify(couldNotAnswerText(`the assistant's reply did not complete (${phoneText(turn.failureReason ?? "unknown", 40)})`));
+      await notify(mateFailureText(turn.failureReason));
       finish({ state: "failed", outcome: `replayed:${turn.failureReason ?? "failed"}` });
       report.refused++;
       return;
@@ -708,9 +713,14 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     return;
   }
   const { who, session, thread, config } = resolved;
-  const revalidate = async (): Promise<{ ok: true } | { ok: false; reason: string }> => {
+  const revalidate = async (): Promise<{ ok: true } | { ok: false; reason: MateChannelProblem }> => {
     const problem = await telegramChannelProblem(store, { botId, bindingId: binding.id, approverGeneration: binding.approverGeneration, repos: who.repos }, readProjects);
-    return problem === null ? { ok: true } : { ok: false, reason: problem };
+    if (problem === null) return { ok: true };
+    const reason: MateChannelProblem = problem === UNREADABLE_REGISTRY ? "projects-unreadable"
+      : problem === "this chat is no longer paired" ? "unpaired"
+        : problem === "the paired account is no longer an approver" ? "not-approver"
+          : problem === "the connected projects changed" ? "projects-changed" : "access-changed";
+    return { ok: false, reason };
   };
   // Bound BEFORE the dispatch, under the claim: a crash from here on finds
   // the receipt in this session, not in whichever session is live later.
@@ -721,23 +731,29 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
   // crash gets the original turn back, never a second dispatch.
   const heartbeat = setInterval(() => { held(); }, 30_000);
   heartbeat.unref?.();
+  // Once the turn reaches a tool step: a 👍 on the owner's message, and "typing…" while the lead works.
+  const warm = warmTurn({
+    react: () => transport("setMessageReaction", { chat_id: chatId, message_id: Number(row.messageId), reaction: [{ type: "emoji", emoji: WARM_EMOJI }] }),
+    typing: () => transport("sendChatAction", { chat_id: chatId, action: "typing" }),
+  });
   let outcome: Awaited<ReturnType<typeof runMateTurn>>;
   try {
     outcome = await runMateTurn({
       store, who, session, thread, config, key: null, message: row.text, requestId: row.request,
       ...(row.context === null ? {} : { context: row.context }),
       ...(options.subscriptionRunner === undefined ? {} : { subscriptionRunner: options.subscriptionRunner }),
-      clock, evidenceRoot: options.evidenceRoot, revalidate, mediaDelivery: "documents", channel: "telegram",
+      clock, evidenceRoot: options.evidenceRoot, revalidate, mediaDelivery: "documents", channel: "telegram", onProgress: warm.onProgress,
     });
   } finally {
     clearInterval(heartbeat);
+    warm.stop();
   }
   const receipt = store.mateRequestReceipt(session.id, row.request);
   if (receipt !== null) store.bindTelegramConversationTurn(row.id, owner, session.id, receipt.turn);
 
   if (!outcome.ok && "refused" in outcome) {
     if (outcome.refused === "concurrent") { await requeue("busy"); return; }
-    await notify(phoneText(couldNotAnswerText(outcome.message), 1_000));
+    await notify(phoneText(outcome.message, 1_000));
     finish({ state: "failed", outcome: `refused:${outcome.refused}` });
     report.refused++;
     return;
@@ -745,8 +761,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
   if (!outcome.ok) {
     // Truthful: what failed, that nothing was kept, and that a new message
     // is a new turn. A failed turn's drafts are already gone.
-    const words = outcome.failed === "revoked" ? `${outcome.message.charAt(0).toUpperCase()}${outcome.message.slice(1)}.` : couldNotAnswerText(`the assistant's reply did not complete (${outcome.message})`);
-    await notify(phoneText(words, 1_000));
+    await notify(phoneText(outcome.message, 1_000));
     finish({ state: "failed", outcome: `failed:${outcome.failed}` });
     report.refused++;
     return;
