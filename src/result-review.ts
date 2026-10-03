@@ -212,16 +212,17 @@ export function resultFactsFromHtml(html: string): Record<string, string>[] {
 }
 
 /** Where a result form may send its reader back: the review cockpit's
- * own deep link, the chat's result detail, or the run page. Anything else
- * lands on the run page. Matched exactly — never a bare open redirect. */
-export function resultReturnTarget(raw: string | null | undefined, runId: number): string {
+ * own deep link, the chat's result detail, the page of a task named in
+ * `tasks` (the run's own), or the run page. Anything else lands on the run
+ * page. Matched exactly — never a bare open redirect. */
+export function resultReturnTarget(raw: string | null | undefined, runId: number, tasks: readonly string[] = []): string {
   if (raw !== null && raw !== undefined) {
     const review = /^\/review\?result=[A-Za-z0-9._~%-]{1,200}(?:&run=([0-9]{1,15}))?(?:&tab=(?:summary|changes|checks))?$/.exec(raw);
     if (review !== null && (review[1] === undefined || Number(review[1]) === runId)) return raw;
     const chat = /^\/chat\?task=([A-Za-z0-9._~%-]{1,200})&result=([0-9]{1,15})(?:&conversation=[A-Za-z0-9-]{1,128})?$/.exec(raw);
     if (chat !== null && Number(chat[2]) === runId) return raw;
-    // The task page that offered Run checks in place.
-    if (/^\/t\/[A-Za-z0-9._~%-]{1,200}$/.test(raw)) return raw;
+    // The run's own task page, which offered Run checks in place; never another task's.
+    if (tasks.some(task => raw === `/t/${encodeURIComponent(task)}`)) return raw;
   }
   return `/r/${runId}`;
 }

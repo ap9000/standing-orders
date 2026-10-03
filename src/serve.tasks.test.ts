@@ -2622,31 +2622,73 @@ describe("failures say what failed and builds say how far along: the demo's own 
       link: { label: `See build #${run}`, href: `/review?result=retire-legacy-flag&run=${run}` },
     });
     expect(failed.retry).toEqual({ action: "/t/retire-legacy-flag/requeue", note: failed.failure!.suggestion });
-    // The demo runs no checks, so no row offers them, and nothing leads to Chat.
+    // The demo runs no checks: the Checks row says so and offers nothing, and nothing leads to Chat.
     expect(JSON.stringify(failed.status)).not.toContain("/chat?");
     expect(failed.runChecks).toBeNull();
+    expect(failed.status!.status.details.find(one => one.key === "checks")).toMatchObject({ text: "Can't run in the demo", action: null, href: null });
+    // The Requirements row counts what it missed.
+    expect(failed.status!.status.details.find(one => one.key === "requirements")).toMatchObject({ text: "1 missed", mark: "failed" });
     // Its build record and result page are there, and Chat says the same thing.
     expect((await fetch(`${base}/review?result=retire-legacy-flag&run=${run}`, { headers: { cookie } })).status).toBe(200);
+    const result = ((await (await fetch(`${base}/review?result=retire-legacy-flag&run=${run}&format=workspace`, { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    expect(result.selected!.panel!.status!.details.find(one => one.key === "checks")).toMatchObject({ text: "Can't run in the demo", action: null });
+    expect(result.selected!.panel!.status!.details.find(one => one.key === "requirements")).toMatchObject({ text: "1 missed" });
     expect((await fetch(`${base}/r/${run}`, { headers: { cookie }, redirect: "manual" })).headers.get("location")).toBe(`/review?result=retire-legacy-flag&run=${run}`);
     const chat = await (await fetch(`${base}/chat?task=retire-legacy-flag`, { headers: { cookie } })).text();
     expect(chat).toContain("Missed a requirement: No reference to LEGACY_PAYOUT remains in the codebase.");
     expect(chat).not.toMatch(/href="\/chat\?task=retire-legacy-flag&amp;result=[0-9]+&amp;tab=checks#follow-ups"/);
   });
 
-  test("the building task says which step it is on and which it is stuck on, and its earlier stopped attempt is one quiet line", async () => {
-    const building = await view("/t/harden-webhook-retries");
+  test("the building task says which step it is stuck on in place of the step line, with Stop in the same card, and its earlier stopped attempt is one quiet line", async () => {
+    const html = await (await fetch(`${base}/t/harden-webhook-retries`, { headers: { cookie } })).text();
+    const building = workspaceOf(html).view as import("./browser-workspace.js").BrowserTaskView;
+    const stuck = "Stuck on step 4 of 6: the flag is off in the staging deploy target — confirming before enforcing.";
     expect(building.status!.status.headline).toBe("Building");
-    expect(building.status!.status.sentence).toBe("Step 3 of 6: Enforce the limiter before dispatch.");
-    expect(building.progress).toEqual({ line: "Step 3 of 6: Enforce the limiter before dispatch.", stuck: {
-      step: 4, why: "the flag is off in the staging deploy target — confirming before enforcing",
-      line: "Stuck on step 4: the flag is off in the staging deploy target — confirming before enforcing.",
+    expect(building.status!.status.sentence).toBe(stuck);
+    expect(building.progress).toEqual({ line: stuck, stuck: {
+      step: 4, why: "the flag is off in the staging deploy target — confirming before enforcing", line: stuck,
       action: { label: "Send the agent a note", href: "#steering" } } });
     // The act lands somewhere real: the Steering fold with its note form.
     expect(building.manage.some(one => one.id === "steering")).toBe(true);
+    // Stop is in that card, for this exact build; no second Stop card, and no panel saying the live file view is off.
+    const live = runsOf("harden-webhook-retries").find(one => one.outcome === null && one.role === "builder")!;
+    expect(building.stop).toEqual({ action: "/t/harden-webhook-retries/stop", run: live.id });
+    expect(building.lead.some(one => one.key === "control" || one.key === "attempt")).toBe(false);
+    expect(renderedHtmlOf(html)).not.toContain("the live file view is off");
+    // Rendered, the card holds the stuck line, its note act and the exact-run Stop form, side by side.
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { TaskView } = await import("./browser/views/task-view.js");
+    const card = renderToStaticMarkup(createElement(TaskView, { view: building, csrf: "token" })).split('data-task-status')[1]!.split("</section>")[0]!;
+    expect(card).toContain(`data-build-stuck="4"`);
+    expect(card).toContain(stuck);
+    expect(card).toContain("data-stuck-action");
+    expect(card).toMatch(new RegExp(`<form class="task-stop-form[^"]*" data-task-control="stop" data-control-run="${live.id}" action="/t/harden-webhook-retries/stop" method="post">`));
+    expect(card).toContain(`<input type="hidden" name="run" value="${live.id}"/>`);
     const stopped = runsOf("harden-webhook-retries").find(one => one.role === "builder" && one.outcome === "refused")!;
     expect(building.earlier).toEqual({ summary: "1 earlier attempt stopped", attempts: [{ label: `Build #${stopped.id}`, href: `/r/${stopped.id}`, text: "The plan changed, so a fresh attempt took over." }] });
     // Not a red mark in the thread beside the healthy build.
     expect(building.thread!.some(one => one.key === `run-${stopped.id}`)).toBe(false);
     expect(building.thread!.some(one => one.kind === "progress" && /^Building/.test(one.title))).toBe(true);
+  });
+
+  test("while the live build reads anything but Building, its earlier stopped attempt stays in the thread", async () => {
+    const live = runsOf("harden-webhook-retries").find(one => one.outcome === null && one.role === "builder")!;
+    const stopped = runsOf("harden-webhook-retries").find(one => one.role === "builder" && one.outcome === "refused")!;
+    made.store.saveDecision({ run: live.id, urgency: "blocking", recap: "The staging flag is off.", question: "Enforce the limiter anyway?",
+      options: [{ id: "yes", label: "Enforce it", consequence: "Turns it on.", reversible: true }, { id: "no", label: "Wait", consequence: "Leaves it off.", reversible: true }], recommendation: "no" }, new Date());
+    const asking = await view("/t/harden-webhook-retries");
+    expect(asking.status!.status.headline).not.toBe("Building");
+    expect(asking.earlier ?? null).toBeNull();
+    expect(asking.progress ?? null).toBeNull();
+    expect(asking.thread!.some(one => one.key === `run-${stopped.id}`)).toBe(true);
+  });
+
+  test("the Tasks list says the same from the database alone: no saved file is read for a row", async () => {
+    // Every saved file gone: a row still names the stuck step and the missed requirement.
+    rmSync(made.evidenceRoot, { recursive: true, force: true });
+    const rows = (workspaceOf(await (await fetch(`${base}/work`, { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTasksView).rows;
+    expect(rows.find(row => row.id === "harden-webhook-retries")?.detail).toBe("Stuck on step 4 of 6: the flag is off in the staging deploy target — confirming before enforcing.");
+    expect(rows.find(row => row.id === "retire-legacy-flag")?.detail).toBe("Missed a requirement: No reference to LEGACY_PAYOUT remains in the codebase.");
   });
 });

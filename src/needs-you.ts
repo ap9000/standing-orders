@@ -284,3 +284,13 @@ export function missedRequirementLine(statement: string): string {
   const cut = plain.length <= REASON_LINE_LIMIT - 10 ? plain : `${plain.slice(0, REASON_LINE_LIMIT - 11).replace(/\s+\S*$/, "")}…`;
   return `Missed a requirement: ${cut}${cut.endsWith("…") ? "" : "."}`;
 }
+
+/** The longest note Retry's field takes. */
+export const RETRY_NOTE_LIMIT = 500;
+
+/** Retry's note, prefilled with the suggestion: cut to what the field takes, at a word, so the form always posts. */
+export function retryNoteOf(suggestion: string): string {
+  const plain = suggestion.trim();
+  if (plain.length <= RETRY_NOTE_LIMIT) return plain;
+  return `${plain.slice(0, RETRY_NOTE_LIMIT - 1).replace(/\s+\S*$/, "").replace(/[,;:\s]+$/, "")}…`;
+}

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { acceptWordsOf, buildProgressOf, earlierAttemptsWords, lastErrorLineOf, missedRequirementOf, reportMismatchesOf } from "./workspace-ui.js";
-import { failedAttemptSentence, failingCheckSuggestion, GENERAL_SUGGESTION, INTERNAL_ERROR, isInternalErrorReason, latestFinishedAttempt, missedRequirementLine, missedRequirementSuggestion, NO_REASON_RECORDED, RUN_REASON_WORDS, stopSuggestionOf } from "./needs-you.js";
+import { failedAttemptSentence, failingCheckSuggestion, GENERAL_SUGGESTION, INTERNAL_ERROR, isInternalErrorReason, latestFinishedAttempt, missedRequirementLine, missedRequirementSuggestion, NO_REASON_RECORDED, RETRY_NOTE_LIMIT, retryNoteOf, RUN_REASON_WORDS, stopSuggestionOf } from "./needs-you.js";
 
 describe("the result's Accept words", () => {
   test("Accept only when every requirement is met and the checks passed, and never says it publishes", () => {
@@ -146,6 +146,15 @@ describe("what a failed attempt missed, and what to change", () => {
     expect(missedRequirementOf([{ id: "c1", statement: "Docs say how.", state: "missing", detail: [] }])?.evidence).toBe("The agent's report doesn't answer it.");
   });
 
+  test("Retry's prefilled note fits its field: cut at a word to 500 characters", () => {
+    expect(retryNoteOf("Say what to do differently this time.")).toBe("Say what to do differently this time.");
+    const long = missedRequirementSuggestion(`Every exported ${"column ".repeat(120)}keeps its header.`);
+    expect(long.length).toBeGreaterThan(RETRY_NOTE_LIMIT);
+    const note = retryNoteOf(long);
+    expect(note.length).toBeLessThanOrEqual(RETRY_NOTE_LIMIT);
+    expect(note).toMatch(/^Before handing off, make sure every exported column column .*column…$/);
+  });
+
   test("a failing check's line and a stop reason each come with one suggestion", () => {
     expect(failingCheckSuggestion("FAIL settle rounds half-cents.")).toBe("Make the check pass. It ended on: FAIL settle rounds half-cents.");
     expect(stopSuggestionOf("timeout")).toBe("Split the work into smaller steps, or name the one part to finish first.");
@@ -167,10 +176,19 @@ describe("how far along a live build is", () => {
     expect(buildProgressOf(null)).toBeNull();
   });
 
-  test("a blocked step says it is stuck and why: its note, else the step itself", () => {
+  test("a blocked step replaces the step line: stuck, which of how many, and why (its note, else the step itself)", () => {
+    const line = "Stuck on step 3 of 3: the staging flag is off.";
     expect(buildProgressOf(steps(["completed", "current", "blocked"], "the staging flag is off")))
-      .toEqual({ step: 2, total: 3, line: "Step 2 of 3: Step 2 words.", stuck: { step: 3, why: "the staging flag is off", line: "Stuck on step 3: the staging flag is off." } });
-    expect(buildProgressOf(steps(["completed", "blocked", "pending"]))?.stuck?.line).toBe("Stuck on step 2: Step 2 words.");
+      .toEqual({ step: 3, total: 3, line, stuck: { step: 3, why: "the staging flag is off", line } });
+    expect(buildProgressOf(steps(["completed", "blocked", "pending"]))?.line).toBe("Stuck on step 2 of 3: Step 2 words.");
+  });
+
+  test("with only the recorded progress (a list row reads no plan file), steps go by number", () => {
+    const recorded = (states: ("pending" | "current" | "completed" | "blocked")[], note: string | null = null) =>
+      states.map(state => ({ description: null, state, note: state === "blocked" ? note : null }));
+    expect(buildProgressOf(recorded(["completed", "current", "pending"]))?.line).toBe("Step 2 of 3.");
+    expect(buildProgressOf(recorded(["completed", "blocked", "pending"], "waiting on staging"))?.line).toBe("Stuck on step 2 of 3: waiting on staging.");
+    expect(buildProgressOf(recorded(["completed", "blocked"]))?.line).toBe("Stuck on step 2 of 2.");
   });
 
   test("earlier stopped attempts are one line", () => {

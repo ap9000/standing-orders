@@ -12,6 +12,7 @@ import { GuardedHtml } from "../guarded-html.js";
 import { Journey } from "../first-run.js";
 import { Badge, Button, Card, Textarea, cn } from "../components/ui/index.js";
 import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
+import { RETRY_NOTE_LIMIT } from "../../needs-you.js";
 
 /** A link to a fold (#scope, #holds, #task-actions) opens it and every fold
  * around it, on arrival and on in-page links alike. */
@@ -46,7 +47,7 @@ export function RetryForm({ action, csrf, note, variant = "default" }: { action:
     <label htmlFor="retry-note" className="text-[13px] font-medium">What to change next time</label>
     {/* The whole suggestion shows, and grows with what the person adds (a single-line field cut it off on a phone). */}
     <div className="flex flex-wrap items-end gap-2 phone:flex-col phone:items-stretch">
-      <Textarea id="retry-note" name="note" maxLength={500} rows={1} defaultValue={note ?? ""} placeholder="Note for the next attempt (optional)" data-retry-note
+      <Textarea id="retry-note" name="note" maxLength={RETRY_NOTE_LIMIT} rows={1} defaultValue={note ?? ""} placeholder="Note for the next attempt (optional)" data-retry-note
         className="min-h-9 min-w-0 flex-1 basis-72 resize-none [field-sizing:content] max-h-40 phone:min-h-11 phone:basis-auto" />
       <Button type="submit" variant={variant} className="phone:w-full" data-primary-action title="Keeps the branch and workspace">Retry</Button>
     </div>
@@ -62,12 +63,23 @@ function FailureEvidence({ failure }: { failure: NonNullable<BrowserTaskView["fa
   </p>;
 }
 
+/** Stop, on the Building card: the same exact-run stop form the control card posts. */
+function StopForm({ stop, csrf }: { stop: NonNullable<BrowserTaskView["stop"]>; csrf: string }) {
+  return <form method="post" action={stop.action} className="task-stop-form phone:w-full" data-task-control="stop" data-control-run={stop.run}>
+    <input type="hidden" name="csrf" value={csrf} />
+    <input type="hidden" name="run" value={stop.run} />
+    <input type="hidden" name="return" value="task" />
+    <Button type="submit" variant="destructive" className="phone:w-full" data-stop-build>Stop</Button>
+  </form>;
+}
+
 /** One headline, one sentence and one action; the details sit quietly
  * underneath (task-status.ts). Only Failed wears vermilion: its dot and, at
  * half strength, its border; its sentence is what it missed, the evidence
  * one line under it, and Retry's note starts with what to change. A live
- * build says the step it is on, or the step it is stuck on and why; the
- * attempts that stopped before it are one quiet line at the bottom. */
+ * build says the step it is on; a stuck step takes that line's place, with
+ * its act beside it, and Stop sits in the same card; the attempts that
+ * stopped before it are one quiet line at the bottom. */
 function StatusCard({ view, card, csrf }: { view: BrowserTaskView; card: AssignmentCard; csrf: string }) {
   const failed = card.status.headline === "Failed";
   const confirm = view.confirmStopped ?? null, rebuild = view.rebuild ?? null, retry = view.retry ?? null, failure = view.failure ?? null;
@@ -77,14 +89,12 @@ function StatusCard({ view, card, csrf }: { view: BrowserTaskView; card: Assignm
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3 phone:gap-y-2.5">
       <div className="min-w-0 flex-1 basis-64">
         <StatusHeadline status={card.status} />
-        <p className={cn("mt-1.5 text-sm phone:mt-1 phone:leading-[1.35]", failed ? "text-foreground" : "text-muted-foreground")}
-          {...(failed ? { "data-failure-reason": "" } : {})} {...(view.progress != null ? { "data-build-progress": "" } : {})}>
+        {/* A stuck step is the one thing a person may help with: it replaces the step line, said plainly, its act beside it. */}
+        <p className={cn("mt-1.5 text-sm phone:mt-1 phone:leading-[1.35]", failed || stuck !== null ? "text-foreground" : "text-muted-foreground", stuck !== null && "flex gap-2")}
+          {...(failed ? { "data-failure-reason": "" } : {})} {...(view.progress != null ? { "data-build-progress": "" } : {})} {...(stuck !== null ? { "data-build-stuck": stuck.step } : {})}>
+          {stuck !== null && <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />}
           <span className="[overflow-wrap:anywhere]">{card.status.sentence}</span>
         </p>
-        {/* A stuck step is the one thing a person may help with: said plainly, with its act beside the card. */}
-        {stuck !== null && <p className="mt-1 flex gap-2 text-sm phone:leading-[1.35]" data-build-stuck={stuck.step}>
-          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" /><span className="[overflow-wrap:anywhere]">{stuck.line}</span>
-        </p>}
         {failed && failure != null && <FailureEvidence failure={failure} />}
         {failed && failure != null && !retrying && <p className="mt-1 text-[13px] text-muted-foreground" data-failure-suggestion>What to change: {failure.suggestion}</p>}
       </div>
@@ -92,7 +102,11 @@ function StatusCard({ view, card, csrf }: { view: BrowserTaskView; card: Assignm
       {confirm != null && csrf !== "" ? <ConfirmStoppedForm form={confirm} csrf={csrf} label={card.action?.label ?? "Confirm it stopped"} />
         : rebuild != null && csrf !== "" ? <RebuildForm action={rebuild.action} csrf={csrf} label={card.action?.label ?? "Build again"} />
         : retrying ? null
-        : stuck?.action != null ? <Button asChild variant="outline" className="phone:w-full"><a href={stuck.action.href} data-stuck-action>{stuck.action.label}</a></Button>
+        : stuck?.action != null || view.stop != null ? <div className="flex flex-wrap items-center gap-2 phone:w-full phone:flex-col phone:items-stretch">
+            {stuck?.action != null ? <Button asChild variant="outline" className="phone:w-full"><a href={stuck.action.href} data-stuck-action>{stuck.action.label}</a></Button>
+              : card.action !== null && <Button asChild variant="outline" className="phone:w-full"><a href={card.action.href} data-primary-action>{card.action.label}<ArrowRight /></a></Button>}
+            {view.stop != null && csrf !== "" && <StopForm stop={view.stop} csrf={csrf} />}
+          </div>
         : card.action !== null && <Button asChild variant={card.status.headline === "Needs you" ? "attention" : "default"} className="phone:w-full">
         <a href={card.action.href} data-primary-action {...(card.action.openResult ? { "data-open-result": "" } : {})}>{card.action.label}<ArrowRight /></a>
       </Button>}

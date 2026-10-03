@@ -728,25 +728,34 @@ function requirementEvidenceWords(id: string, detail: string): string {
   return sentenceOf(plainReasonWords(lead === undefined ? detail : detail.slice(lead.length)));
 }
 
-/** One milestone of a live build's plan, as the agent last reported it. */
-export type BuildStep = { description: string; state: "pending" | "current" | "completed" | "blocked"; note: string | null };
-/** Where a live build is: the step it is on ("Step 3 of 6: …"), and the step it is stuck on with why, if any. */
-export type BuildProgress = { step: number; total: number; line: string; stuck: { step: number; why: string; line: string } | null };
+/** One milestone of a live build's plan, as the agent last reported it; its words are null where only the recorded
+ * progress was read (a list row reads no plan file). */
+export type BuildStep = { description: string | null; state: "pending" | "current" | "completed" | "blocked"; note: string | null };
+/** Where a live build is, in one line: "Step 3 of 6: …", or, when a step is blocked, "Stuck on step 4 of 6: <why>" in
+ * its place. `stuck` says which step and why; null while nothing is blocked. */
+export type BuildProgress = { step: number; total: number; line: string; stuck: { step: number; why: string | null; line: string } | null };
 
-const stepWords = (text: string): string => text.trim().replace(/\s+/g, " ").replace(/[.\s]+$/, "");
+const stepWords = (text: string | null): string | null => {
+  const plain = text?.trim().replace(/\s+/g, " ").replace(/[.\s]+$/, "") ?? "";
+  return plain === "" ? null : plain;
+};
 
-/** A live build's progress: the step in progress (else the first one not done) as "Step N of M: <step>", and a
- * blocked step as "Stuck on step N: <why>" (its note, else the step itself). Null with no plan steps. */
+/** A live build's progress: the step in progress (else the first one not done) as "Step N of M: <step>"; a blocked
+ * step replaces it as "Stuck on step N of M: <why>" (its note, else the step itself). Null with no plan steps. */
 export function buildProgressOf(steps: readonly BuildStep[] | null | undefined): BuildProgress | null {
   if (steps == null || steps.length === 0) return null;
   const total = steps.length;
   const blocked = steps.findIndex(one => one.state === "blocked");
-  const why = blocked < 0 ? null : stepWords(steps[blocked]!.note ?? steps[blocked]!.description);
-  const stuck = blocked < 0 || why === null ? null : { step: blocked + 1, why, line: `Stuck on step ${blocked + 1}: ${why}.` };
+  if (blocked >= 0) {
+    const why = stepWords(steps[blocked]!.note) ?? stepWords(steps[blocked]!.description);
+    const line = `Stuck on step ${blocked + 1} of ${total}${why === null ? "" : `: ${why}`}.`;
+    return { step: blocked + 1, total, line, stuck: { step: blocked + 1, why, line } };
+  }
   const current = steps.findIndex(one => one.state === "current");
   const at = current >= 0 ? current : steps.findIndex(one => one.state !== "completed");
-  if (at < 0) return { step: total, total, line: `All ${total} steps done. Finishing up.`, stuck };
-  return { step: at + 1, total, line: `Step ${at + 1} of ${total}: ${stepWords(steps[at]!.description)}.`, stuck };
+  if (at < 0) return { step: total, total, line: `All ${total} steps done. Finishing up.`, stuck: null };
+  const words = stepWords(steps[at]!.description);
+  return { step: at + 1, total, line: `Step ${at + 1} of ${total}${words === null ? "" : `: ${words}`}.`, stuck: null };
 }
 
 /** Earlier attempts that stopped before the one now running, in one quiet line. */

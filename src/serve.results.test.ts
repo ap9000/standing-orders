@@ -20,7 +20,7 @@ import { storeEvidence } from "./evidence.js";
 import { sealVerificationReceipt } from "./verification-evidence.js";
 import { createDecisionServer, reviewPriorityOf, rankReviewQueue, withinSignedTouches, diffFileAnchor, reviewFilePriority, orderChangedFiles, type ReviewQueueFacts, type ReviewFileRow } from "./serve.js";
 import type { MateProviderAnswer } from "./converse.js";
-import { resultFactsFromHtml } from "./result-review.js";
+import { resultFactsFromHtml, resultReturnTarget } from "./result-review.js";
 import { Window } from "happy-dom";
 import { validateTaskText, TASK_TEXT_LIMITS } from "./task-text.js";
 import { presented, T0, stylesOf, renderedHtmlOf, workspaceOf, revisionIdOf, plannerKeptTerms, revisionFormOf } from "../test/serve-kit.js";
@@ -1187,7 +1187,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(selected.panel!.status).toMatchObject({ headline: "Failed", sentence: `Missed a requirement: ${statement}` });
     // What it missed is said once, plainly: the recorded wording isn't repeated as a caveat.
     expect(selected.panel!.attention.join(" ")).not.toContain("caveat 1 admits");
-    expect(selected.failure).toEqual({ line: `Missed a requirement: ${statement}`, evidence: task.failure!.evidence, suggestion, link: null, retry: { action: "/t/t-fail/requeue" } });
+    expect(selected.failure).toEqual({ line: `Missed a requirement: ${statement}`, evidence: task.failure!.evidence, suggestion, link: null, retry: { action: "/t/t-fail/requeue", note: suggestion } });
+    // The Requirements row says what failed, in a count: never "Unverified".
+    expect(selected.panel!.status!.details.find(one => one.key === "requirements")).toMatchObject({ text: "1 missed", mark: "failed" });
     expect(selected.acts).toEqual({ primary: "retry", secondary: "run-checks", line: null });
     expect(selected.decision).toBeNull();
     expect(selected.complete).toBeNull();
@@ -1204,12 +1206,33 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(selected.runChecks).toEqual({ action: `/r/${run}/checks`, level: "full", returnTo: `${page}&tab=checks` });
     const again = await post(cookie, selected.runChecks!.action, { csrf, level: "full", return: selected.runChecks!.returnTo });
     expect(again.headers.get("location")).toBe(`${page}&tab=checks#follow-ups`);
+    // Only this run's own task page is a way back; another task's page is not.
+    expect(resultReturnTarget("/t/t-fail", run, ["t-fail"])).toBe("/t/t-fail");
+    expect(resultReturnTarget("/t/t-other", run, ["t-fail"])).toBe(`/r/${run}`);
+    expect(resultReturnTarget("/t/t-fail", run)).toBe(`/r/${run}`);
 
     // Retried, the task moves on; the build's page still opens, now without Retry.
     expect((await post(cookie, "/t/t-fail/requeue", { csrf })).status).toBe(303);
     const after = (await read()).selected!;
     expect(after.failure).toMatchObject({ line: `Missed a requirement: ${statement}`, retry: null });
     expect(after.acts.primary).not.toBe("retry");
+  });
+
+  test("a failed task's delivered result is still a result: it opens as one, never as the failed build's page", async () => {
+    const patch = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n";
+    const run = build("t-builtfail", seed("t-builtfail", "Built, then the task failed"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], verdict: { verdict: "verified" } });
+    store.setTaskState("t-builtfail", "failed", T0);
+    await boot();
+    const cookie = await login();
+    const page = `/review?result=t-builtfail&run=${run}`;
+    expect((await fetch(url(`/r/${run}`), { headers: { cookie }, redirect: "manual" })).headers.get("location")).toBe(page);
+    const selected = (((await (await fetch(url(`${page}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView).selected!;
+    // Its own reading and acts, as any result: not the failed build's Failed card with Retry in place of them.
+    expect(selected.failure ?? null).toBeNull();
+    expect(selected.status.label).not.toBe("Failed");
+    expect(selected.panel!.status!.headline).not.toBe("Failed");
+    expect(selected.acts.primary).not.toBe("retry");
+    expect([selected.acts.primary, selected.acts.secondary]).toContain("request-changes");
   });
 
   test("a missing or unreadable proof reads Accept without checks, and Accept never posts publish", async () => {

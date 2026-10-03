@@ -3403,13 +3403,11 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
   test("the task page offers the live build honestly: the attempt panel names the build, says the view is off without --runner, embeds it with", async () => {
     const cookie = await login();
     const plain = await (await fetch(url("/t/alive"), { headers: { cookie } })).text();
-    // The panel (slice 1c) names the run by its one unambiguous identity
-    // and always carries the door to the full build view.
-    expect(plain).toContain(`build #${liveRun} · night-shift-1 · running`);
-    expect(plain).toContain(`href="/r/${liveRun}">full build view →`);
-    // Without --runner the panel says the view is off — no poller, no
-    // region, and no promise of a live look.
-    expect(plain).toContain("the live file view is off");
+    // Without --runner there is nothing live to show on the task page: no
+    // panel saying the view is off, no poller, no region, and no promise of
+    // a live look. The build's own page says why.
+    expect(plain).not.toContain("the live file view is off");
+    expect(plain).not.toContain(`build #${liveRun} · night-shift-1 · running`);
     expect(plain).not.toContain('id="run-peek"');
     expect(plain).not.toContain("?fragment=peek");
 
@@ -3422,7 +3420,10 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     await boot({ localRunner: "night-shift-1" });
     const cookieOn = await login();
     const watching = await (await fetch(url("/t/alive"), { headers: { cookie: cookieOn } })).text();
+    // The panel (slice 1c) names the run by its one unambiguous identity
+    // and always carries the door to the full build view.
     expect(watching).toContain(`build #${liveRun} · night-shift-1 · running`);
+    expect(watching).toContain(`href="/r/${liveRun}">full build view →`);
     expect(watching).toContain('id="run-peek"');
     expect(watching).toContain("watching…");
     expect(watching).not.toContain("the live file view is off");

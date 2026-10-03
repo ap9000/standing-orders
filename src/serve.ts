@@ -76,8 +76,8 @@ import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequest
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
 import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS, type AssignmentCard } from './assignment-ui.js';
-import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
-import { ASKS, ASK_LABEL, GENERAL_SUGGESTION, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, failingCheckSuggestion, isInternalErrorReason, latestFinishedAttempt, missedRequirementLine, missedRequirementSuggestion, runReasonWords, stopSuggestionOf, type Ask, type FailureExplanation } from './needs-you.js';
+import { assignmentStageOf, demoChecksOf, pullRequestFactOf, requirementsOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
+import { ASKS, ASK_LABEL, GENERAL_SUGGESTION, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, retryNoteOf, failingCheckSuggestion, isInternalErrorReason, latestFinishedAttempt, missedRequirementLine, missedRequirementSuggestion, runReasonWords, stopSuggestionOf, type Ask, type FailureExplanation } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -2265,18 +2265,20 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         if (error instanceof WorkIndexCursorError) return refuse(response, who, 400, 'This task page has expired. Open the first page.', '/work');
         throw error;
       }
-      // A failed row says what its latest attempt missed, as its task page does (a stop reason already reads so).
+      // A failed row says what its latest attempt missed, as its task page does (a stop reason already reads so); a
+      // live build's row says which step it is on, or the step it is stuck on. Both from the database alone: a list
+      // reads no saved file per row (no check log, no plan), so a row names the step by number.
       work = { ...work, items: work.items.map((item): WorkIndexItem & { progress?: string } => {
-        // A live build's row says which step it is on, and the step it is stuck on.
         if (item.liveRunId !== null) {
           const ref = store.lookupRef(item.activeTaskId);
-          const steps = ref === null ? null : buildProgressOf(progressOf(ref.id, revisionLedgerOf(ref.id).current?.document ?? null));
-          return steps === null ? item : { ...item, progress: [steps.line, steps.stuck?.line].filter(Boolean).join(" ") };
+          const recorded = ref === null ? null : store.latestCheckpointForTask(ref.id)?.snapshot.milestones ?? null;
+          const steps = buildProgressOf(recorded?.map(one => ({ description: null, state: one.state, note: one.note ?? null })));
+          return steps === null ? item : { ...item, progress: steps.line };
         }
         if (item.state !== "failed") return item;
         const family = familyOf(item.activeTaskId);
         if (family === null || family.problem !== null) return item;
-        const failure = failureOf(family.versions.flatMap(version => store.runsFor(version.refId)), null);
+        const failure = failureOf(family.versions.flatMap(version => store.runsFor(version.refId)), null, false);
         return failure.kind === "reason" ? item : { ...item, status: { ...item.status, detail: failure.line } };
       }) };
       const page = workPage(chromeFor(project, "work", undefined, rollup ? "all" : undefined), {
@@ -2621,14 +2623,16 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         return sendScreen(response, 409, screen("Result changed", '<h1>Result changed</h1><p>This acceptance link no longer matches the current result. Review the current task before accepting.</p><p class="refusal-back"><a class="button-link" href="/review">Review results</a></p>', { chrome: chromeFor(project, "runs") }));
       }
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
-      if (selected !== null && attemptRow !== null && selected.run !== null) {
+      // Only a build that delivered nothing reads Failed here. A built (or no-change) result opens as a result, its own
+      // acts and all, Accept included where it may be accepted, whatever its task has done since.
+      if (selected !== null && attemptRow !== null && selected.run !== null && selected.run.outcome !== "built" && selected.run.outcome !== "no-change") {
         const attemptRun = store.getRun(selected.run.id);
         const task = store.getTask(selected.taskId);
         const latest = attemptRun === null ? null : latestFinishedAttempt(store.runsFor(attemptRun.taskRef));
         // Retry from here only when this is the failed task's latest attempt and nothing holds it.
         const retry = task?.state === "failed" && latest?.id === selected.run.id && csrf !== "" && who.role === "approver" && store.currentLiveLease(attemptRun!.taskRef, now) === null
           ? { action: `${taskHref(selected.taskId)}/requeue` } : null;
-        if (attemptRun !== null) selected.failure = { ...explainAttempt(attemptRun, null), retry };
+        if (attemptRun !== null) { const failure = explainAttempt(attemptRun, null); selected.failure = { ...failure, retry: retry === null ? null : { ...retry, note: retryNoteOf(failure.suggestion) } }; }
       }
       const reviewPage = reviewCockpitPage(chromeFor(wantedId === null ? project : chosenProject, "runs"), {
           queue: ranked,
@@ -6116,25 +6120,26 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
   }
 
   /** What went wrong with the latest finished attempt (whatever its outcome, never an older failure). */
-  function failureOf(runs: readonly Run[], assignment: AssignmentSnapshot | null): FailureExplanation {
+  function failureOf(runs: readonly Run[], assignment: AssignmentSnapshot | null, readLog = true): FailureExplanation {
     const last = latestFinishedAttempt(runs);
     if (last === null) return { kind: "reason", line: NO_REASON_RECORDED, evidence: null, suggestion: GENERAL_SUGGESTION, link: null };
     const full = store.getRun(last.id);
     return full === null ? { kind: "reason", line: failedAttemptSentence(last.reason), evidence: null, suggestion: stopSuggestionOf(last.reason), link: null }
-      : explainAttempt(full, assignment?.receipt?.runId === last.id ? assignment.receipt : null);
+      : explainAttempt(full, assignment?.receipt?.runId === last.id ? assignment.receipt : null, readLog);
   }
 
   /** One finished attempt's failure in plain words: a failing check's last error line (linked to that line in its
    * saved log), else the first signed requirement it missed with the evidence line behind it, else its recorded reason
    * in plain words (or that none was recorded). Each comes with one suggestion of what to change, and a link to the
    * attempt's own result page, where its changes, checks and failure are; machine output reads as an internal error,
-   * its detail behind a link to that line of the attempt's record. */
-  function explainAttempt(run: Run, receipt: AssignmentSnapshot["receipt"] | null): FailureExplanation {
+   * its detail behind a link to that line of the attempt's record. `readLog` false (a list's rows) reads no saved
+   * check log: the requirement or the reason, from the database alone. */
+  function explainAttempt(run: Run, receipt: AssignmentSnapshot["receipt"] | null, readLog = true): FailureExplanation {
     const taskId = store.externalIdFor(run.taskRef) ?? "";
     const page = `${reviewHref(taskId)}&run=${run.id}`;
     const see = taskId === "" ? null : { label: `See build #${run.id}`, href: page };
     const artifacts = store.artifactsFor(run.id);
-    const logArtifact = receipt?.checks.status === "failed" && receipt.checks.logArtifactId !== null
+    const logArtifact = !readLog ? null : receipt?.checks.status === "failed" && receipt.checks.logArtifactId !== null
       ? artifacts.find(one => one.id === receipt.checks.logArtifactId) ?? null
       : [...artifacts].reverse().find(one => one.kind === "check-log") ?? null;
     if (logArtifact !== null) {
@@ -6201,6 +6206,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     // What went wrong reads the family's latest finished attempt, as the Tasks row does.
     presentedData.failure = failureOf(presentedData.family?.runs ?? data.runs, data.assignment ?? null);
     presentedData.runChecks = runChecksHere(data.assignment?.receipt?.runId ?? null, who, taskHref(taskId));
+    presentedData.demo = store.isDemo();
     const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     const page = taskPage(
       paneProject === null && !unscopedMode
@@ -9824,7 +9830,9 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const id = Number(followUp[1]);
       const found = store.getRun(id);
       if (found === null || !visible(taskRepoOf(found.taskRef))) return refuse(response, who, 404, "no such run");
-      const back = resultReturnTarget(body.get("return"), id);
+      // The task page that offered Run checks in place is a return target too: this run's own task, or its family's root.
+      const runTask = store.externalIdFor(found.taskRef);
+      const back = resultReturnTarget(body.get("return"), id, runTask === null ? [] : [runTask, familyOf(runTask)?.root.id ?? runTask]);
       if (who.via !== "cookie") return refuse(response, who, 403, "Sign in with a browser session to do this.", back);
       if (followUp[2] === "checks") {
         if (who.role !== "approver") return refuse(response, who, 403, "An approver runs checks.", back);
@@ -11528,6 +11536,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       intent,
       plan,
       contest: contestOf(),
+      ...(store.isDemo() ? { demo: true } : {}),
     };
     if (run === null) {
       return { ...base, run: null, detail: null, reviewRetry: null, review: null, notes: [] };
@@ -17368,7 +17377,7 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
 function chatStatusSentence(focus: TaskChatFocus): string | undefined {
   if (focus.state === "failed" && focus.failure != null) return [focus.failure.line, focus.failure.evidence].filter(Boolean).join(" ");
   const steps = focus.liveRun === null ? null : buildProgressOf(focus.milestoneProgress);
-  return steps === null ? undefined : [steps.line, steps.stuck?.line].filter(Boolean).join(" ");
+  return steps === null ? undefined : steps.line;
 }
 
 /** One live, server-derived journey from request to proof. The fragment is
@@ -20921,6 +20930,8 @@ function taskBodyParts(data: {
   failure?: FailureExplanation | null;
   /** Run checks in place, for a status row that offers it. */
   runChecks?: { action: string; level: "quick" | "full"; returnTo: string } | null;
+  /** The demo database: no check runs here, and the Checks row says so. */
+  demo?: boolean;
   assignment?: AssignmentSnapshot | null;
   checkProgress?: CheckProgress | null;
   rootId?: string;
@@ -21142,16 +21153,14 @@ function taskBodyParts(data: {
       return `<div class="card attempt-live" data-live-run="${liveRun.id}">${head}` +
         `<p class="meta">${data.degraded === "sensitive" ? "this page carries a password ceremony, so the live view stays on the build page" : "the live view is on the build page"}</p>${door}</div>`;
     }
+    // With the live file view off there is nothing live to show here: no panel (the build's own page says why).
+    if (data.peekable !== true) return "";
     const peek =
-      data.peekable === true
-        ? `<p class="meta">what is changing right now</p>` +
-          `<div id="run-peek"><p class="meta">watching\u2026 the first look lands within 15 seconds</p></div>` +
-          `<p class="meta" id="run-peek-stamp"></p>`
-        : `<p class="meta">the live file view is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`;
+      `<p class="meta">what is changing right now</p>` +
+      `<div id="run-peek"><p class="meta">watching\u2026 the first look lands within 15 seconds</p></div>` +
+      `<p class="meta" id="run-peek-stamp"></p>`;
     const transcript =
-      data.peekable !== true
-        ? ""
-        : liveRun.provider !== "claude"
+      liveRun.provider !== "claude"
           ? `<p class="meta">the live transcript needs the claude harness for now \u2014 this build runs on ${escape(liveRun.provider)}</p>`
           : `<p class="meta">what the agent is saying · display only \u2014 this is not evidence, and the machine running the agent could alter it</p>` +
             `<pre id="live-transcript" class="mono" style="max-height:18rem;overflow:auto;white-space:pre-wrap"></pre>` +
@@ -22287,8 +22296,14 @@ function taskBodyParts(data: {
   thread.push({ key: "filed", at: rootFiled, kind: "filed", who: "person", author: filedBy ?? "", title: "Filed the task",
     text: (() => { const goal = data.family?.root.goal ?? scope?.goal ?? null; return goal === null ? null : oneLineOf(goal, 280); })(), link: null, html: "", more: null });
   const newestBuilt = familyRuns.filter(run => run.outcome === "built" && run.role !== "planner" && run.role !== "reviewer").sort((a, b) => b.id - a.id)[0];
-  // While a build runs, the attempts that stopped before it fold into one quiet line under the status card.
-  const earlierStopped = liveRun === undefined || liveRun.role === "planner" || liveRun.role === "reviewer" ? []
+  // Failed: the card says what went wrong in one line, and its one act is Retry itself (the same requeue), never a link to
+  // this page; someone who can't retry here (a viewer, a live claim) gets no act at all.
+  const statusCard = data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null;
+  // A live build says which step it is on, or which step it is stuck on and why.
+  const building = statusCard?.status.headline === "Building" && liveRun !== undefined && liveRun.role !== "planner" && liveRun.role !== "reviewer";
+  // While a build runs, the attempts that stopped before it fold into one quiet line under its Building card. Only
+  // there: with any other card (or none) they stay in the thread, never vanish.
+  const earlierStopped = !building ? []
     : familyRuns.filter(run => run.id < liveRun.id && (run.role === "builder" || run.role === "scout") && run.outcome !== "built" && run.outcome !== "no-change" && run.id !== liveHistoryRunId);
   const foldedAttempts = new Set(earlierStopped.map(run => run.id));
   for (const run of familyRuns) {
@@ -22399,9 +22414,6 @@ function taskBodyParts(data: {
   // needs a person, then facts, then folds; the mechanics under Manage.
   const MANAGE = new Set(["steering", "waits-for", "holds"]);
   const finished = task.state === "done" || task.state === "cancelled";
-  // Failed: the card says what went wrong in one line, and its one act is Retry itself (the same requeue), never a link to
-  // this page; someone who can't retry here (a viewer, a live claim) gets no act at all.
-  const statusCard = data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null;
   const failedCard = statusCard?.status.headline === "Failed";
   // A link to this very page, with no section to open, goes nowhere: a card never offers one.
   const bareSelfLink = (href: string): boolean => {
@@ -22414,23 +22426,27 @@ function taskBodyParts(data: {
   const rebuild = data.csrf !== "" && data.assignment?.primaryAction?.code === "retry-task" && data.assignment.need != null && "key" in data.assignment.need && data.assignment.need.key === "rebuild"
     ? { action: `${taskHref(data.assignment.rootId)}/requeue` } : null;
   const retry = failedCard && task.state === "failed" && !data.claimed && !stopControlsActive && data.csrf !== ""
-    ? { action: `${taskHref(task.id)}/requeue`, ...(data.failure == null ? {} : { note: data.failure.suggestion }) } : null;
+    ? { action: `${taskHref(task.id)}/requeue`, ...(data.failure == null ? {} : { note: retryNoteOf(data.failure.suggestion) }) } : null;
   // Run checks happens in place: a status row's Run checks posts here and comes back; with nothing to run, the row offers nothing.
   const runChecks = data.runChecks ?? null;
   // A row's link to a result in Chat opens that result's own page instead: Chat would only lead back here.
   const resultPageOf = (href: string | null): string | null => {
-    const chat = href === null ? null : /^\/chat\?task=([A-Za-z0-9._~%-]{1,200})&result=([0-9]{1,15})(?:&tab=(changes|checks))?$/.exec(href);
-    return chat === null ? href : `/review?result=${chat[1]}&run=${chat[2]}${chat[3] === undefined ? "" : `&tab=${chat[3]}`}`;
+    const chat = href === null ? null : /^\/chat\?task=([A-Za-z0-9._~%-]{1,200})&result=([0-9]{1,15})(?:&tab=(changes|checks))?(#[A-Za-z0-9_-]{1,80})?$/.exec(href);
+    return chat === null ? href : `/review?result=${chat[1]}&run=${chat[2]}${chat[3] === undefined ? "" : `&tab=${chat[3]}`}${chat[4] ?? ""}`;
   };
-  const inPlaceChecks = (card: AssignmentCard): AssignmentCard => ({ ...card, status: { ...card.status, details: card.status.details.map(one =>
-    one.action?.href?.endsWith("#follow-ups") === true ? { ...one, action: runChecks === null ? null : { label: one.action.label, href: runChecks.action } }
-      : { ...one, href: resultPageOf(one.href), action: one.action === null ? null : { ...one.action, href: resultPageOf(one.action.href) } }) } });
-  // A live build says which step it is on, or which step it is stuck on and why.
-  const building = statusCard?.status.headline === "Building" && liveRun !== undefined;
+  const inPlaceChecks = (card: AssignmentCard): AssignmentCard => {
+    const status = data.demo === true ? demoChecksOf(card.status) : card.status;
+    return { ...card, status: { ...status, details: status.details.map(one =>
+      one.action?.href?.endsWith("#follow-ups") === true ? { ...one, action: runChecks === null ? null : { label: one.action.label, href: runChecks.action } }
+        : { ...one, href: resultPageOf(one.href), action: one.action === null ? null : { ...one.action, href: resultPageOf(one.action.href) } }) } };
+  };
   const steps = building ? buildProgressOf(data.milestoneProgress ?? null) : null;
   const progress = steps === null ? null : { line: steps.line,
     stuck: steps.stuck === null ? null : { ...steps.stuck, action: data.csrf === "" ? null : { label: "Send the agent a note", href: "#steering" } } };
-  const earlier = !building || earlierStopped.length === 0 ? null : {
+  // The Building card carries Stop for the build it describes (the same form), in place of a second card below it.
+  const stop = building && data.control?.kind === "stop" && data.control.run === liveRun!.id && data.csrf !== ""
+    ? { action: `${taskHref(task.id)}/stop`, run: data.control.run } : null;
+  const earlier = earlierStopped.length === 0 ? null : {
     summary: earlierAttemptsWords(earlierStopped.length),
     attempts: [...earlierStopped].sort((a, b) => a.id - b.id).map(run => ({ label: `${runNoun(run)[0]!.toUpperCase()}${runNoun(run).slice(1)} #${run.id}`, href: `/r/${run.id}`,
       text: run.outcome === null ? "Never finished." : run.outcome === "failed" ? failedAttemptSentence(run.reason) : run.reason === null ? null : (words => `${words.charAt(0).toUpperCase()}${words.slice(1)}.`)(reasonWords(run.reason)) })),
@@ -22454,6 +22470,7 @@ function taskBodyParts(data: {
     retry,
     runChecks,
     progress,
+    stop,
     earlier,
     approval: approvalHtml,
     confirmStopped: data.csrf !== "" && data.assignment?.primaryAction?.code === "confirm-stopped" && data.assignment.primaryAction.target.runId !== null
@@ -22461,7 +22478,7 @@ function taskBodyParts(data: {
     rebuild,
     // The plan, progress and plan changes are thread entries now; the rest still needs a person here.
     lead: [
-      { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
+      { key: "history", html: data.history ?? "" }, { key: "control", html: stop === null ? controlHtml : "" }, { key: "problem", html: problemHtml },
       { key: "pull-request", html: pullRequestCard },
       { key: "needs-scope", html: needsScopeCard },
       { key: "mirror", html: mirrorCard }, { key: "contest", html: contestCard }, { key: "attempt", html: attemptPanel },
@@ -22785,8 +22802,10 @@ type ReviewCockpitView = {
   /** The same history as the shared projection's facts (review fixes). */
   review: ReviewFacts | null;
   notes: { id: number; author: string; note: string; createdAt: string }[];
+  /** The demo database: no check runs here, and the Checks row says so. */
+  demo?: boolean;
   /** A build that didn't deliver a result: what it missed, the suggestion, and Retry when the task can be retried here. */
-  failure?: (FailureExplanation & { retry: { action: string } | null }) | null;
+  failure?: (FailureExplanation & { retry: { action: string; note: string } | null }) | null;
 };
 
 /** The one result page's address: the task and its run, never a project path
@@ -23207,10 +23226,14 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
       panel: (() => {
         // A Chat link to this same result would lead back here: it isn't one.
         const elsewhere = (href: string | null): boolean => href !== null && !href.endsWith("#follow-ups") && !new RegExp(`^/chat\\?task=[^&]+&result=${run.id}(?:&|$)`).test(href);
-        const status = panel.panel.status === null ? null : { ...panel.panel.status, details: panel.panel.status.details.map(one => ({ ...one,
+        const shown = panel.panel.status === null ? null : view.demo === true ? demoChecksOf(panel.panel.status) : panel.panel.status;
+        const missed = proof === null || proof.proofProblem !== null ? 0 : requirementsOf(proof.matrix)?.missed ?? 0;
+        const status = shown === null ? null : { ...shown, details: shown.details.map(one => ({ ...one,
           href: elsewhere(one.href) ? one.href : null, action: one.action !== null && elsewhere(one.action.href) ? one.action : null })) };
         return failure === null ? { ...panel.panel, status }
-          : { ...panel.panel, outcome: failure.line, need: null, youCheck: null, status: status === null ? null : { ...status, headline: "Failed" as const, tone: "danger" as const, sentence: failure.line, need: null },
+          : { ...panel.panel, outcome: failure.line, need: null, youCheck: null, status: status === null ? null : { ...status, headline: "Failed" as const, tone: "danger" as const, sentence: failure.line, need: null,
+              // Read as Failed, the Requirements row counts what it missed, as the task's card does.
+              details: status.details.map(one => one.key !== "requirements" || missed === 0 ? one : { ...one, text: `${missed} missed`, mark: "failed" as const, action: null }) },
             // What it missed is said once, in plain words above; the recorded wording stays under Details.
             attention: panel.panel.attention.filter(one => !(proof?.reasons ?? []).includes(one) && !(proof?.matrix ?? []).some(row => row.detail.includes(one))) };
       })(),

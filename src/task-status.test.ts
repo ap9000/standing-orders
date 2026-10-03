@@ -3,7 +3,7 @@
  * the Failed headline alone. */
 import { describe, expect, test } from "vitest";
 import {
-  HEADLINES, assignmentStatusFacts, headlineOf, unverifiedWhenRefuted, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailLines, statusDetailsHtml, taskStatusOf,
+  DEMO_CHECKS, HEADLINES, assignmentStatusFacts, demoChecksOf, headlineOf, requirementsOf, unverifiedWhenRefuted, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailLines, statusDetailsHtml, taskStatusOf,
   type ChecksFact, type PullRequestFact, type TaskStage, type TaskStatusFacts,
 } from "./task-status.js";
 import type { AssignmentSnapshot } from "./assignment.js";
@@ -247,5 +247,22 @@ describe("requirements while the report is refuted", () => {
     expect(row).toMatchObject({ text: "Unverified", mark: "none" });
     expect(unverifiedWhenRefuted({ met: 2, total: 2, yours: 0 }, "verified")).toEqual({ met: 2, total: 2, yours: 0 });
     expect(taskStatusOf({ stage: "finished", requirements: { met: 2, total: 2, yours: 0 } }).details.find(one => one.key === "requirements")).toMatchObject({ text: "2 of 2 met", mark: "ok" });
+  });
+
+  test("a failed result says how many it missed, refuted or not", () => {
+    const missed = unverifiedWhenRefuted(requirementsOf([{ state: "failed" }, { state: "pass" }]), "refuted");
+    expect(missed).toEqual({ met: 1, total: 2, yours: 0, missed: 1, unverified: true });
+    expect(taskStatusOf({ stage: "failed", requirements: missed }).details.find(one => one.key === "requirements")).toMatchObject({ text: "1 missed", mark: "failed" });
+    // Anywhere else, the refuted reading stands.
+    expect(taskStatusOf({ stage: "needs-you", need: "review-result", requirements: missed }).details.find(one => one.key === "requirements")).toMatchObject({ text: "Unverified" });
+  });
+});
+
+describe("checks in the demo", () => {
+  test("a Checks row that would run one says the demo can't; a recorded result stays as it is", () => {
+    const notRun = taskStatusOf({ stage: "failed", checks: { status: "not-run", exitCode: null, head: HEAD }, links: { runChecks: "/r/7/checks" } });
+    expect(demoChecksOf(notRun).details.find(one => one.key === "checks")).toMatchObject({ text: DEMO_CHECKS, action: null, href: null });
+    const ran = taskStatusOf({ stage: "failed", checks: failed });
+    expect(demoChecksOf(ran).details).toEqual(ran.details);
   });
 });
