@@ -835,7 +835,7 @@ export const OPERATE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "json", "yes", "all", "local", "history", "latest-watch", "dry-run", "file", "allow-paid-fallback",
   "clear", "follow", "ready", "all-tasks", "inbound-only", "help", "undo", "anyone", "allow-dispatch", "allow-merge", "merge-delete-branch",
   "no-open", "remove", "no-verify", "no-follow", "end", "report", "off", "tmux",
-  "self-heal", "plan-auto", "repair-auto", "review-retry-auto", "no-local",
+  "self-heal", "plan-auto", "chat-approve", "repair-auto", "review-retry-auto", "no-local",
   "html", "csv", "alerts-only",
   // v105: the full export.
   "zip",
@@ -6395,6 +6395,8 @@ async function modeCommand(
   // The paid-fallback grant (R8): NEVER a preset default — only this
   // explicit flag lets an exhausted subscription switch to another account.
   if (flag(flags, "allow-paid-fallback")) terms.allowPaidFallback = true;
+  // Approving plans and merges from the signer's paired chat: never a preset default, only this flag.
+  if (flag(flags, "chat-approve")) terms.chatApprove = true;
   // Automerge requires a live merge-capable grant on the repo (D1).
   if (terms.publication === "automerge" && !store.hasMergeCapableGrant(repo, now)) {
     return fail(write, json, "mode set", "no-grant", "automerge needs a merge-capable publication grant on this repo — file one first", EXIT.refused);

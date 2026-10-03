@@ -96,6 +96,7 @@ import { DISCLOSURE_CSS } from "./disclosure.js";
 import { styleAsset } from "./style-asset.js";
 import { MOBILE_VIEWPORT_SCRIPT } from "./mobile-viewport.js";
 import { authorizePlanUnderMode, applyModeToNewFiling, planAutoPending } from "./plan-auto.js";
+import { permissionPlainWords } from "./chat-decide.js";
 import { LEDGER_CSV_HEADER, ledgerCsvRows } from "./ledger-csv.js";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -2850,6 +2851,10 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
                 `<option value="0">wait for my approval</option>` +
                 `<option value="1">auto-approve plans that preserve my filed contract</option>` +
                 `</select><span class="meta">Requires automatic filing approval. File the goal, paths, and acceptance criteria upfront. Changed scope and unanswered questions still pause.</span></label>`,
+              `<label>From my chat app<select name="chat-approve">` +
+                `<option value="">approve plans and merges here, with my password (the default)</option>` +
+                `<option value="1">approve plans and merge ready pull requests from my paired chat, two taps each</option>` +
+                `</select><span class="meta">Plans that widen permissions, exceed the attempt cap or touch protected paths still open Toolroll.</span></label>`,
               `<label>If a subscription runs out<select name="allow-paid-fallback">` +
                 `<option value="">never switch to a paid API key on its own (the default, every preset)</option>` +
                 `<option value="1">allow the approved fallback — spend moves to that account</option>` +
@@ -8561,6 +8566,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         // attempt cap it carries is meaningless without it.
         repairAuto: false,
         repairMaxAttempts: 0,
+        // Approving from the paired chat: only the explicit choice grants it.
+        chatApprove: body.get("chat-approve") === "1",
         publication: body.get("publication") === "automerge" ? "automerge" : "notify",
       };
       if (["review-auto", "review-retry-auto", "repair-auto"].some(field => body.get(field) === "1")) {
@@ -8584,7 +8591,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           `<input type="hidden" name="csrf" value="${escape(who.session.csrf)}">` +
           `<input type="hidden" name="nonce" value="${escape(nonce)}">` +
           `<input type="hidden" name="digest" value="${escape(digest)}">` +
-          ["name", "days", "publication", "auto-approve", "plan-auto", "allow-paid-fallback"]
+          ["name", "days", "publication", "auto-approve", "plan-auto", "chat-approve", "allow-paid-fallback"]
             .map(field => `<input type="hidden" name="${field}" value="${escape(body.get(field) ?? "")}">`)
             .join("") +
           `<input type="hidden" name="expiry" value="${escape(expiry)}">` +
@@ -12409,7 +12416,7 @@ function approvalSheetHtml(input: {
   // What the yes allows, in plain words, right above it: the agent's
   // permissions, the per-attempt limit, and an earlier version still running.
   const allowing: string[] = [];
-  const allowed = permissionPlainWordsOf(scope.profile);
+  const allowed = permissionPlainWords(scope.profile);
   if (allowed !== null) allowing.push(allowed);
   if (raceTerms === null) allowing.push(scope.budgetMicrousd === null ? "no attempt limit" : `up to ${money(scope.budgetMicrousd)} per attempt`);
   const earlier = earlierVersionsWords(input.earlier.active, input.earlier.running);
@@ -12570,19 +12577,6 @@ class PermissionsWouldChange extends Error {}
 
 /** Evidence kinds in plain words, for the signed criteria in Details. */
 const EVIDENCE_PLAIN: Record<string, string> = { check: "the project check", screenshot: "screenshots", "changed-path": "changed files", "manual-review": "your own check" };
-
-/** What an agent may do on its own, in a few plain words. */
-function permissionPlainWordsOf(profile: Scope["profile"] | null | undefined): string | null {
-  if (profile === null || profile === undefined) return null;
-  const full = "full access, nothing asks first";
-  if (profile.provider === "claude") {
-    return profile.permissionArgv === "bypassPermissions" ? full
-      : profile.permissionArgv === "auto" ? "file edits and routine commands; anything risky stops"
-      : "file edits only; commands are refused";
-  }
-  if (profile.provider === "gemini") return profile.approvalArgv === "yolo" ? full : "file edits only; other tools are refused";
-  return profile.sandboxMode === "danger-full-access" ? full : "file edits and commands inside the project only";
-}
 
 /** The permission choice a sealed profile carries, as the scope form names it. */
 function permissionModeOfProfile(profile: Scope["profile"] | null | undefined): UnattendedPermissionMode | null {

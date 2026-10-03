@@ -335,6 +335,41 @@ CREATE TABLE IF NOT EXISTS mate_ask (
 );
 CREATE INDEX IF NOT EXISTS mate_ask_thread ON mate_ask (thread, turn);
 `;
+/** Decisions in the chat app (chat-decide.ts; no version bump: additive only). A token names one act on one card (the chat and message it rides); `digest` is
+ * what the card showed — a receipt, a revision source, a task stamp, a plan or a commit. */
+export const CHAT_DECIDE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS chat_decide_action (
+  token       TEXT PRIMARY KEY,
+  channel     TEXT NOT NULL,
+  binding     INTEGER NOT NULL,
+  chat        TEXT NOT NULL,
+  message     TEXT,
+  act         TEXT NOT NULL CHECK (act IN ('accept','changes','retry','approve','not-now','merge')),
+  phase       TEXT NOT NULL CHECK (phase IN ('offer','yes','cancel')),
+  task_id     TEXT NOT NULL,
+  run         INTEGER,
+  digest      TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS chat_decide_action_message ON chat_decide_action (channel, chat, message);
+CREATE TABLE IF NOT EXISTS chat_decide_prompt (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel     TEXT NOT NULL,
+  binding     INTEGER NOT NULL,
+  chat        TEXT NOT NULL,
+  task_id     TEXT NOT NULL,
+  run         INTEGER NOT NULL,
+  digest      TEXT NOT NULL,
+  message     TEXT,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS chat_decide_prompt_open ON chat_decide_prompt (channel, binding, consumed_at);
+`;
+
 export type MateAsk = { turn: number; thread: number; question: string; options: string[]; createdAt: string };
 export const MATE_ASK_OTHER = "Something else";
 /** How long the question's buttons work, on every channel. */
@@ -5172,6 +5207,8 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(MONITORING_SCHEMA);
   db.exec(INTEGRATIONS_SCHEMA);
   db.exec(MATE_ASK_SCHEMA);
+  // Decisions in the chat app (no version bump: additive only): result, plan and merge buttons, and Request changes.
+  db.exec(CHAT_DECIDE_SCHEMA);
   db.exec(SPEND_SCHEMA);
   // Sign-in pauses: one row per incident of a provider's sign-in no longer working.
   db.exec(PROVIDER_AUTH_SCHEMA);
