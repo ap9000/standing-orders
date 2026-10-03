@@ -3792,7 +3792,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
               back: { href: roomId ? "/chat?conversation=" + encodeURIComponent(roomId) : taskChatHref(focusTask?.id ?? ""), label: "Back to chat" },
               finishes,
             }) + (finishes && focusTask?.assignment?.receipt != null
-              ? completionForm(focusTask.assignment.receipt.taskId, resultRun.id, focusTask.assignment.receipt.digest, who.session.csrf, pullRequestTargetOf(resultRun.id), personCheckPending(focusTask.assignment.receipt)) : '');
+              ? completionForm(focusTask.assignment.receipt.taskId, resultRun.id, focusTask.assignment.receipt.digest, who.session.csrf, pullRequestTargetOf(resultRun.id), owedAcceptanceOf(focusTask.assignment.receipt)) : '');
       const focusProblem = requestedTask !== null && focusTask === null
         ? "That task is not available in this workspace."
         : requestedResult !== null && focusTask !== null && resultRun === null
@@ -23000,7 +23000,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     : blocked === ACCEPT_NEEDS_REASON ? { note: "Why is this safe to accept?" } : null;
   const complete = assignment?.state === "ready-to-check" && assignment.receipt !== null && canRetryReview && csrf !== ""
     ? { action: `${taskHref(view.taskId)}/complete`, receipt: assignment.receipt.digest, run: run.id, accept: owed } : null;
-  if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf, view.detail?.pullRequestTo ?? null, owed !== null));
+  if (complete !== null) parts.push(completionForm(view.taskId, run.id, complete.receipt, csrf, view.detail?.pullRequestTo ?? null, owed));
   // The one decision, after the evidence: Accept and finish only when every requirement is met and the checks passed.
   const acceptsHere = complete !== null || panel.panel.need?.accept != null || youCheck?.accept != null;
   const matrix = proof === null || proof.proofProblem !== null ? [] : proof.matrix;
@@ -23087,9 +23087,19 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   };
 }
 
-function completionForm(taskId: string, runId: number, digest: string, csrf: string, pullRequestTo: string | null = null, accept = false): string {
-  // Accept and finish, in one request: with an acceptance owed (the person's own checks), the same post records it first.
-  const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${escape(digest)}"><input type="hidden" name="run" value="${runId}">${accept ? `<input type="hidden" name="accept" value="1">` : ""}`;
+/** What Accept and finish owes before it completes, as the form asks for it: the person's own check (no
+ * reason), an exception a report that doesn't match its changes needs a reason for, or nothing. */
+function owedAcceptanceOf(receipt: AssignmentSnapshot["receipt"]): { note: string | null } | null {
+  if (receipt === null || receipt.proofAcceptance !== null) return null;
+  if (personCheckPending(receipt)) return { note: null };
+  return cantAcceptYetOf(receipt.proof?.verdict ?? null, receipt.proof?.reasons ?? [], false) === ACCEPT_NEEDS_REASON ? { note: "Why is this safe to accept?" } : null;
+}
+
+function completionForm(taskId: string, runId: number, digest: string, csrf: string, pullRequestTo: string | null = null, accept: { note: string | null } | null = null): string {
+  // Accept and finish, in one request: with an acceptance owed (the person's own checks, or an exception and
+  // its reason, asked for right here), the same post records it first.
+  const hidden = `<input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="receipt" value="${escape(digest)}"><input type="hidden" name="run" value="${runId}">${accept === null ? "" : `<input type="hidden" name="accept" value="1">`}` +
+    (accept?.note == null ? "" : `<label class="meta" for="complete-reason-${runId}">${escape(ACCEPT_NEEDS_REASON)}</label><input type="text" id="complete-reason-${runId}" name="note" maxlength="500" required placeholder="${escape(accept.note)}">`);
   if (pullRequestTo !== null) {
     // With pull requests set up: the PR is the primary road, a bare finish the quiet one beside it.
     return `<form method="post" action="${taskHref(taskId)}/complete" class="card result-complete">${hidden}<p class="meta">Finishes the task. A pull request opens on ${escape(pullRequestTo)} from this exact commit when you ask for one.</p><div class="result-complete-actions"><button type="submit" name="publish" value="1" style="min-height:44px">Complete and open a pull request</button><button type="submit" class="secondary" style="min-height:44px">Accept and finish</button></div></form>`;

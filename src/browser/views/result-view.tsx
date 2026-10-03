@@ -404,8 +404,9 @@ function SelectedResult({ selected, csrf }: { selected: Selected; csrf: string }
   const decide = <Decision selected={selected} csrf={csrf} acts={acts} decision={decision} firstUnanswered={unanswered[0]?.id ?? null} />;
   return <>
     <StatusCard selected={selected} acts={acts} answers={answers} />
-    {/* The decision comes after the evidence. Inside the result's own column, the phone's dock can never rise over the status above. */}
-    {selected.panel !== null ? <Panel panel={selected.panel}>{checks}{decide}</Panel> : <div className="flex flex-col gap-4">{checks}{decide}</div>}
+    {/* The decision comes after the evidence. The phone's dock sticks only within the person's checks and the
+        decision itself, so it can never rise over the status or the Summary facts above them. */}
+    {selected.panel !== null ? <Panel panel={selected.panel}><div className="flex flex-col gap-4">{checks}{decide}</div></Panel> : <div className="flex flex-col gap-4">{checks}{decide}</div>}
     {selected.contest !== "" && <Html html={selected.contest} />}
     <Details selected={selected} />
   </>;

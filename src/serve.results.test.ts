@@ -1169,6 +1169,43 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(read().state).toBe("complete");
   });
 
+  test("a crafted Accept and finish records an acceptance only for a person's check or a reasoned exception; otherwise it is a plain completion", async () => {
+    const mismatch = { verdict: "refuted" as const, reasons: ["a criterion cites a file that did not change"] };
+    const patch = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n";
+    const bare = build("t-bare", seed("t-bare", "Round the totals"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }] });
+    const silent = build("t-silent", seed("t-silent", "Round the fees"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], verdict: mismatch });
+    const reasoned = build("t-reasoned", seed("t-reasoned", "Round the refunds"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], verdict: mismatch });
+    await boot();
+    for (const id of ["t-bare", "t-silent", "t-reasoned"]) store.stampRun(store.runsFor(store.refFor("built-in", id).id)[0]!.id, { scopeDigest: store.getScope(id)!.digest });
+    const cookie = await login();
+    const read = (id: string) => assignmentOf(store, id, new Date(), { principal: "operator", repos: null }, evidenceRoot)!;
+    const acceptances = (id: string) => store.handle.prepare("SELECT COUNT(*) AS n FROM action_ledger WHERE task_id = ? AND action = 'task accept-proof'").get(id);
+    // A report that doesn't match its changes: the page's Accept and finish asks for the reason, required, in the same form.
+    const html = await (await fetch(url(`/review?result=t-silent&run=${silent}`), { headers: { cookie } })).text();
+    const form = /<form[^>]*action="\/t\/t-silent\/complete"[^>]*>[\s\S]*?<\/form>/.exec(html)?.[0] ?? "";
+    expect(form).toContain('name="accept" value="1"');
+    expect(form).toMatch(/<input type="text"[^>]*name="note"[^>]*required/);
+    const csrf = csrfOf(html);
+    // Nothing owed (no proof at all): accept=1 is the plain completion, no acceptance.
+    expect((await post(cookie, "/t/t-bare/complete", { csrf, run: String(bare), receipt: read("t-bare").receipt!.digest, accept: "1" })).status).toBe(303);
+    expect(read("t-bare").state).toBe("complete");
+    expect(store.proofAcceptance(bare)).toBeNull();
+    expect(acceptances("t-bare")).toEqual({ n: 0 });
+    // A mismatch posted without its reason: no acceptance is recorded; it completes as Mark complete would, its verdict unchanged.
+    const verdict = store.proofVerdictFor(silent);
+    expect((await post(cookie, "/t/t-silent/complete", { csrf, run: String(silent), receipt: read("t-silent").receipt!.digest, accept: "1" })).status).toBe(303);
+    expect(read("t-silent").state).toBe("complete");
+    expect(read("t-silent").receipt!.completionKind).not.toBe("accepted-exception");
+    expect(store.proofAcceptance(silent)).toBeNull();
+    expect(acceptances("t-silent")).toEqual({ n: 0 });
+    expect(store.proofVerdictFor(silent)).toEqual(verdict);
+    // With its reason: the exception is accepted, with the reason, and the task finishes in the same request.
+    expect((await post(cookie, "/t/t-reasoned/complete", { csrf, run: String(reasoned), receipt: read("t-reasoned").receipt!.digest, accept: "1", note: "The cited file moved; the change is right." })).status).toBe(303);
+    expect(store.proofAcceptance(reasoned)).toMatchObject({ approver: "alex", note: "The cited file moved; the change is right." });
+    expect(acceptances("t-reasoned")).toEqual({ n: 1 });
+    expect(read("t-reasoned")).toMatchObject({ state: "complete", receipt: { completionKind: "accepted-exception" } });
+  });
+
   test("checks that didn't run on a project that has one: Run checks is the one ink act, Accept without checks beside it", async () => {
     const patch = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n";
     const run = build("t-runcheck", seed("t-runcheck", "Check the rounding"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], handoff: { conclusion: "Rounded at cent precision." } });

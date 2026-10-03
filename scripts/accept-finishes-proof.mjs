@@ -18,7 +18,8 @@
  * and Accept reads "Accept without your check" in outline with one line naming
  * it; Accept and finish is one request that records the acceptance and the
  * completion; on a phone the dock starts as one row (ink act and More) and
- * never covers the status card on load. Exits 1 when a check fails. */
+ * never covers the status card or a fact (each status fact, the first Summary
+ * fact) on load. Exits 1 when a check fails. */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -158,6 +159,9 @@ const factsOf = page => page.evaluate(() => {
     reason: visible(document.querySelector('#accept-reason')),
     requirements: document.querySelector('[data-result-status] [data-status-detail="requirements"]')?.textContent.trim() ?? null,
     status: box(document.querySelector('[data-result-status]')),
+    // The facts as they load: each status fact row, then the first thing the Summary tab says.
+    facts: [...document.querySelectorAll('[data-result-status] [data-status-detail]'), document.querySelector('[data-result-view="summary"]:not([hidden]) .so-result-view > *')]
+      .map(box).filter(one => one !== null && one.top < innerHeight),
     statusDoc: (() => { const r = document.querySelector('[data-result-status]').getBoundingClientRect(); return Math.round(r.bottom + scrollY); })(),
     tabs: tabs === null ? null : Math.round(tabs.getBoundingClientRect().top + scrollY),
     checks: (() => { const el = document.querySelector('[data-result-you-check]'); return el === null ? null : Math.round(el.getBoundingClientRect().top + scrollY); })(),
@@ -195,11 +199,20 @@ for (const state of STATES) {
           check(`${label}: the dock starts compact — one row, the ink act and More`, f.dockState === 'compact' && f.acts.length === 1 && f.acts[0].ink && f.more && f.position === 'sticky' && f.dock.height <= 90 && f.line === null && !f.reason,
             JSON.stringify({ acts: f.acts, more: f.more, dock: f.dock, line: f.line, reason: f.reason }));
           check(`${label}: the dock never covers the status card on load`, f.dock === null || f.status === null || f.dock.top >= f.status.bottom, JSON.stringify({ dock: f.dock, status: f.status }));
+          check(`${label}: the dock never covers a fact on load (each status fact, then the first Summary fact)`, f.facts.length > 0 && (f.dock === null || f.facts.every(one => one.bottom <= f.dock.top || one.top >= f.dock.bottom)),
+            JSON.stringify({ dock: f.dock, facts: f.facts }));
         }
       }
       // On desk the decision sits after the evidence: the capture scrolls to it; on a phone it is the page as it loads.
       if (where === 'desk') await page.locator('[data-result-decision]').evaluate(el => el.scrollIntoView({ block: 'end' }));
       await capture(page, `${state.key}-${where}-${scheme}`);
+      if (where === 'phone' && scheme === 'light' && state.key === 'check-pending') {
+        // Reading the check, the compact dock stays pinned under it.
+        await page.locator('[data-result-you-check]').evaluate(el => el.scrollIntoView({ block: 'start' }));
+        const reading = await factsOf(page);
+        check(`${label}: reading the check, the compact dock stays in view`, reading.dock !== null && reading.dock.top < PHONE.height && reading.dock.bottom <= PHONE.height + 20 && reading.dockState === 'compact', JSON.stringify(reading.dock));
+        await capture(page, `${state.key}-phone-reading`);
+      }
       if (where === 'phone' && scheme === 'light') {
         await page.locator('[data-dock-more]').click();
         const opened = await factsOf(page);
@@ -273,7 +286,7 @@ await browser.close();
     await page.screenshot({ path, fullPage: true });
     report.screenshots.push({ path: join(shown, `${pair}-light-dark.png`), caption: `${pair.replace('-', ' ')}: light and dark, ${pair.includes('phone') ? 'on load' : 'scrolled to the decision'} (synthetic)` });
   }
-  for (const extra of ['mismatch-phone-more', 'check-not-right-desk-light']) report.screenshots.push({ path: join(shown, `${extra}.png`), caption: extra });
+  for (const extra of ['check-pending-phone-reading', 'mismatch-phone-more', 'check-not-right-desk-light']) report.screenshots.push({ path: join(shown, `${extra}.png`), caption: extra });
   await page.context().browser().close();
 }
 
