@@ -255,7 +255,8 @@ import { dirname } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { loadOrCreateVapidKeys, validatePushEndpoint } from "./push.js";
 import { parseGithubRepo, previewGithubRepo, cloneGithubRepo, listGithubRepos, isLargeRepo, type ListOutcome } from "./onboard.js";
-import { verifiedAuthor, LEAD_THREAD, isDigestTime, MATE_ASK_OTHER, type MateAsk, type MateThreadScope } from "./store.js";
+import { verifiedAuthor, LEAD_THREAD, isDigestTime, RESULT_SCREENSHOTS, type ResultScreenshots, MATE_ASK_OTHER, type MateAsk, type MateThreadScope } from "./store.js";
+import { RESULT_SHOT_CHOICES } from "./result-shots.js";
 import { digestTimes } from "./digest-times.js";
 import type { MateProgress } from "./mate-progress.js";
 import { updateRepos, addRepos, removeRepos } from "./repos.js";
@@ -4434,7 +4435,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           return at === null || since === null ? null : firstResultWords(since, at);
         })(), (() => {
           const chosen = store.notificationPreference(who.name);
-          return { mode: chosen.mode, digestAt: chosen.digestAt, projects: notificationProjects(store, who.name) };
+          return { mode: chosen.mode, digestAt: chosen.digestAt, screenshots: chosen.screenshots, projects: notificationProjects(store, who.name) };
         })()),
       );
     }
@@ -8072,13 +8073,17 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
 
     if (url.pathname === "/settings/notifications") {
       // Each person's own choice: a closed list of modes and a 24-hour HH:MM, or off.
-      const mode = body.get("mode"), time = (body.get("digest") ?? "").trim();
+      const mode = body.get("mode"), time = (body.get("digest") ?? "").trim(), shots = body.get("screenshots");
       if (mode !== null && mode !== "quiet" && mode !== "all") return refuse(response, who, 400, "choose Only when I'm needed or Every step", "/settings");
       if (time !== "" && time !== "off" && !isDigestTime(time)) return refuse(response, who, 400, "the evening digest time is HH:MM, or off", "/settings");
+      if (shots !== null && !RESULT_SCREENSHOTS.includes(shots as ResultScreenshots)) return refuse(response, who, 400, "choose Off, First one or Up to 4", "/settings");
       const before = store.notificationPreference(who.name);
-      const after = store.setNotificationPreference(who.name, { ...(mode === null ? {} : { mode }), ...(time === "" ? {} : { digestAt: time === "off" ? null : time }) }, who.name, now);
+      const after = store.setNotificationPreference(who.name, { ...(mode === null ? {} : { mode }), ...(time === "" ? {} : { digestAt: time === "off" ? null : time }),
+        ...(shots === null ? {} : { screenshots: shots as ResultScreenshots }) }, who.name, now);
       const said = after.mode !== before.mode
         ? after.mode === "quiet" ? "Chats now message you only when you're needed." : "Chats now message you at every step."
+        : after.screenshots !== before.screenshots
+        ? after.screenshots === "off" ? "Results arrive without screenshots." : `Results arrive with ${after.screenshots === "first" ? "their first screenshot" : "up to 4 screenshots"}.`
         : after.digestAt === null ? "Evening digest off." : `Evening digest at ${after.digestAt}.`;
       return redirect(response, `/settings?said=${encodeURIComponent(said)}`);
     }
@@ -25798,7 +25803,7 @@ function settingsPage(
   workers: NonNullable<BrowserSettingsView["workers"]> | null = null,
   updates: BrowserUpdates | null = null,
   firstResult: string | null = null,
-  chatNotices: { mode: "quiet" | "all"; digestAt: string | null; projects?: { repo: string; name: string; muted: boolean }[] } | null = null,
+  chatNotices: { mode: "quiet" | "all"; digestAt: string | null; screenshots?: ResultScreenshots; projects?: { repo: string; name: string; muted: boolean }[] } | null = null,
 ): Screen {
   const permissionCard =
     permissionDefault === null
@@ -25844,6 +25849,9 @@ function settingsPage(
             digestTimes(chatNotices.digestAt).map(([value, label]) => `<option value="${value}"${value === (chatNotices.digestAt ?? "off") ? " selected" : ""}>${label}</option>`).join("") +
             `</select></label>`,
           `<p class="meta">One message: what finished, what waits, what failed.</p>`,
+          `<label>Screenshots with results<select name="screenshots">` +
+            RESULT_SHOT_CHOICES.map(([value, label]) => `<option value="${value}"${value === (chatNotices.screenshots ?? "off") ? " selected" : ""}>${label}</option>`).join("") +
+            `</select></label>`,
           `<button type="submit">Save</button>`,
           `</form>`,
           ...((chatNotices.projects ?? []).length === 0 ? [] : [

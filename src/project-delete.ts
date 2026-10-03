@@ -241,6 +241,7 @@ function deleteRows(store: Store, repo: string, d: Doomed, now: Date): number {
   del("telegram_outbound_message", `project = ? OR ${IN("notification")} OR ${IN("task_ref")} OR ${IN("source_run")}`, repo, notifications, T, R);
   del("chat_card_task", IN("task_ref"), T);
   del("chat_batch_item", IN("task_ref"), T);
+  del("result_shot_sent", IN("run"), R);
   del("push_delivery", IN("notification"), notifications);
   del("notification_actor", IN("notification"), notifications);
   del("notification_delivery", IN("notification"), notifications);
