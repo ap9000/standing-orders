@@ -150,10 +150,12 @@ describe("one reply shaper, every channel", () => {
 
 describe("deliverables", () => {
   test("a claim is an attachment noun plus a send verb", () => {
-    for (const claim of ["I've attached the log.", "I'm sending you the report now.", "Sending the file.", "The screenshots are attached.", "I'll share a link to the result.", "Here's the screenshot."])
+    for (const claim of ["I've attached the log.", "I'm sending you the report now.", "Sending the file.", "The screenshots are attached.", "I'll share a link to the result.", "Here's the screenshot.",
+      "Here's the link to the result.", "Here is a link to the result.", "Below is the log file.", "Attached is the file."])
       expect(deliverableClaim(claim), claim).not.toBeNull();
     for (const plain of ["Here's what the log shows: the build failed.", "Want me to send the screenshot?", "The report is ready to review.", "I can attach the log if you like.",
-      "Here are the files I changed: a.ts, b.ts.", "Here's the report.", "I sent the reminder.", "Here's the screenshot I'd take next: the login page."])
+      "Here are the files I changed: a.ts, b.ts.", "Here's the report.", "I sent the reminder.", "Here's the screenshot I'd take next: the login page.",
+      "Here's the log file: build failed at step 3.", "Here are the links:\n- the task\n- the result"])
       expect(deliverableClaim(plain), plain).toBeNull();
   });
   test("a claim whose content the reply lists itself is not a claim", () => {

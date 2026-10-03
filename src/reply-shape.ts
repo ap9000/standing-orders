@@ -353,6 +353,8 @@ const ATTACHMENT_ONLY = String.raw`(?:screenshots?|screen\s?shots?|images?|pictu
 /** Things a reply can also list in its text (file names, log lines, a report's points). */
 const LISTABLE = String.raw`(?:files?|logs?|reports?|diffs?|documents?|links?)`;
 const NOUN = String.raw`(?:${ATTACHMENT_ONLY}|${LISTABLE})`;
+/** Presented ("here's the …") these need an attachment or a link: a reply's text can never be one. */
+const PRESENTED = String.raw`(?:${ATTACHMENT_ONLY}|links?|files?)`;
 const SEND = String.raw`(?:\bi(?:'ve|’ve|\s+have)\s+(?:just\s+)?(?:attached|included|shared|uploaded|sent|enclosed)|\bi(?:'m|’m|\s+am)\s+(?:now\s+)?(?:attaching|sending|sharing|uploading|enclosing)|\bi(?:'ll|’ll|\s+will)\s+(?:now\s+)?(?:attach|send|share|upload|enclose)|^\s*(?:attaching|sending|sharing|uploading|enclosing))\s+(?:you\s+)?`;
 /** A claim is an attachment noun plus a send verb, in one sentence. */
 const CLAIMS = [
@@ -360,8 +362,10 @@ const CLAIMS = [
   new RegExp(String.raw`${SEND}${DETERMINER}(${NOUN})\b`, "i"),
   // "The screenshot is attached", "Logs attached", "the report is enclosed".
   new RegExp(String.raw`\b(${NOUN})\s+(?:(?:is|are|was|were)\s+)?(?:attached|enclosed|uploaded|included\s+below)\b`, "i"),
-  // "Here's the screenshot (of the payout page)." — presenting something that can only be attached, and nothing listed after it.
-  new RegExp(String.raw`^\s*(?:here(?:'s|’s|\s+is|\s+are)|attached\s+(?:is|are))\s+${DETERMINER}(${ATTACHMENT_ONLY})(?:\s+(?:of|for|from|showing)\s+[^:]+?)?[.!:]?\s*$`, "i"),
+  // "Here's the screenshot (of the payout page).", "Here's the link to the result.", "Below is the log file." — presenting
+  // something only a link or attachment can carry, with nothing listed after it. A bare "Here's the report." can be the
+  // reply's own text, so it is not one.
+  new RegExp(String.raw`^\s*(?:here(?:'s|’s|\s+is|\s+are)|(?:attached|below)\s+(?:is|are))\s+${DETERMINER}(?:[\w-]+\s+)?(${PRESENTED})(?:\s+(?:of|for|to|from|showing)\s+[^:]+?)?[.!:]?\s*$`, "i"),
 ];
 
 const SENTENCE = /(?<=[.!?])\s+/;
