@@ -65,6 +65,10 @@ export type AssignmentSnapshot = {
   need?: { key: NeedKey; build: number | null } | { wait: WaitKey; build: number | null } | null;
   /** The person's lead took it on (lead-voice.ts): "Your lead is on it" until done, handed on, or two quiet hours. */
   lead?: LeadClaim | null;
+  /** How many earlier versions of this task are still queued or running; absent when none. */
+  earlierActive?: number;
+  /** Of those, how many are running rather than only queued; present with earlierActive. */
+  earlierRunning?: number;
 };
 
 /** Status-first handoff for routine reads. Fetch get_assignment only when
@@ -168,9 +172,11 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     return decision === null ? [] : [{ taskId: version.id, decision }];
   });
   // A finished task label cannot hide a lease or an unfinished process record.
-  const earlierActive = family.versions.filter(version => version.id !== current.id &&
-    (version.state === "queued" || version.state === "running" || store.currentLiveLease(version.refId, now) !== null ||
-      store.runsFor(version.refId).some(run => run.outcome === null || store.stopQuiescenceProblem(run.id) !== null)));
+  const busy = (version: typeof current): boolean => version.state === "running" || store.currentLiveLease(version.refId, now) !== null ||
+    store.runsFor(version.refId).some(run => run.outcome === null || store.stopQuiescenceProblem(run.id) !== null);
+  const earlierActive = family.versions.filter(version => version.id !== current.id && (version.state === "queued" || busy(version)));
+  // Of those, how many have work under way (the rest only wait in the queue).
+  const earlierRunning = earlierActive.filter(busy).length;
   const unfinished = store.runsFor(current.refId).find(run => run.outcome === null) ?? null;
   const attempts = family.versions.map(version => {
     const summary = version.id === current.id ? work : taskWorkSummaryOf(store, version.id, now, access);
@@ -359,7 +365,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   return { version: 1, rootId: family.root.id, activeTaskId: current.id, repo: current.repo, title: family.root.title,
     state, detail, primaryAction, attention: [...new Set(attention)], attempts, owner, receipt, savedContext, completion, handoff,
     publication: publication === null ? null : { state: publication.state, prUrl: publication.prUrl, remoteState: publication.remoteState },
-    review, deployment: { status: "not-recorded" }, ...(need === null ? {} : { need }), ...(lead === null ? {} : { lead }) };
+    review, deployment: { status: "not-recorded" }, ...(need === null ? {} : { need }), ...(lead === null ? {} : { lead }), ...(earlierActive.length === 0 ? {} : { earlierActive: earlierActive.length, earlierRunning }) };
 }
 
 type MutationResult = { ok: true; assignment: AssignmentSnapshot } | { ok: false; reason: string; message: string };

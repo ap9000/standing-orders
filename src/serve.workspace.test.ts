@@ -13,7 +13,8 @@ import { acquire, release } from "./claim.js";
 import { register } from "./runner.js";
 import { addApprover, approve, hashPassword, propose } from "./scope.js";
 import { storeEvidence } from "./evidence.js";
-import { createDecisionServer } from "./serve.js";
+import { createDecisionServer, earlierVersionsWords } from "./serve.js";
+import { assignmentOf } from "./assignment.js";
 import { Window } from "happy-dom";
 import { presented, stylesOf, workspaceOf, sealScopeFixture } from "../test/serve-kit.js";
 import type { BrowserWorkspace } from "./browser-workspace.js";
@@ -360,6 +361,30 @@ describe("workspace package 1: one navigation shell, Work views, and one truthfu
     store.raw().prepare("UPDATE claim SET released_at = NULL, expires_at = ? WHERE lease_id = ?").run(new Date(now.getTime() + 60000).toISOString(), claim.claim.leaseId);
     expect(await page(cookie, "/t/family-root")).toContain('<a href="/runs">0 live</a>');
     expect(store.getTask("older-sibling")!.state).toBe("queued");
+  });
+
+  test("approving a newer version says an earlier one is still queued while it only waits, and running once it runs", () => {
+    const original = finished("queue-root", "One family", alpha, null);
+    const older = seedTask("queue-older", "Older", alpha);
+    sealScopeFixture(store, "queue-older", approverToken, "Earlier revision");
+    const newest = seedTask("queue-newest", "Newest", alpha);
+    const brief = store.saveArtifact({ run: original.run, kind: "revision-brief", key: "fixture.json", bytesOriginal: 2, bytesStored: 2, truncated: false, sha256: "a".repeat(64), capture: "synthetic lineage fixture" }, now);
+    store.markRevision(older, "queue-root", brief);
+    store.markRevision(newest, "queue-root", brief);
+    store.setTaskState("queue-older", "queued", now);
+    const earlier = () => {
+      const assignment = assignmentOf(store, "queue-root", now, { principal: "operator", repos: [alpha] }, root)!;
+      expect(assignment.activeTaskId).toBe("queue-newest");
+      return earlierVersionsWords(assignment.earlierActive ?? 0, assignment.earlierRunning ?? 0);
+    };
+    expect(earlier()).toBe("an earlier version is still queued");
+    register(store, { name: "queue-worker", host: "here", capacity: 1, repos: [alpha], now, newToken: () => "queue-token" });
+    const claim = acquire(store, older, "queue-worker", { token: "queue-token", now });
+    if (!claim.ok) throw new Error(claim.reason);
+    store.startRun({ taskRef: older, leaseId: claim.claim.leaseId, runner: "queue-worker", branch: "fixture", worktree: join(root, "fixture"), now, ...presented(store, older) });
+    expect(earlier()).toBe("an earlier version is still running");
+    expect(earlierVersionsWords(2, 1)).toBe("2 earlier versions are still queued or running");
+    expect(earlierVersionsWords(0, 0)).toBeNull();
   });
 
   test("pilot 2: approval, queued, build/checks, stop, hold, rescope and failures share one status and primary action", async () => {

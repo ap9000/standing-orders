@@ -1558,6 +1558,14 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(draftHtml).toContain(`<p class="approval-revision">Fixes what build #${run} missed: it works.</p>`);
     const sheetMain = draftHtml.slice(draftHtml.indexOf('class="approve-form approval-sheet"'), draftHtml.indexOf('<details class="approval-details">'));
     expect(sheetMain).not.toContain("Unmet");
+    // Its requirement is one only you can check, said plainly above Approve.
+    expect(sheetMain).toContain('<p class="approval-you-check" data-approval-you-check>You’ll check: it works</p>');
+    // Edit plan shows the goal without the machine brief, which rides along unchanged.
+    expect(sheetMain).toContain('<textarea name="goal" rows="3" form="plan-editor-form">wire the guard</textarea>');
+    // The thread says who asked for the repair; an ask with no words carries none (no empty bubble).
+    const asked = (workspaceOf(draftHtml).view as { thread?: { key: string; title: string; text: string | null }[] }).thread?.find(one => one.key === "revision");
+    expect(asked?.title).toBe("Asked for a repair");
+    expect(asked?.text).toBeNull();
     expect(sheetMain).not.toContain("inherited terms");
 
     // Historical repair records stay readable on their task pages. They do

@@ -306,8 +306,10 @@ describe("the operations console", () => {
     expect(page).toContain("never inherited: the source&#39;s approval, attended sessions, publication and merge grants");
     expect(page).toContain("re-resolved for this approval: the agents route and the fallback chain");
     expect(page).toContain("Checks level: Strict / release · Auto permissions");
-    // Auto permissions: the one line names who builds and the cap, never "Full access".
-    expect(page).toContain('<p class="approval-who">Builder Claude Sonnet · Planner Claude Sonnet · Cap $2.00 per attempt</p>');
+    // Who builds in one line; what the yes allows, plainly, right above Approve.
+    expect(page).toContain('<p class="approval-who">Builder Claude Sonnet · Planner Claude Sonnet</p>');
+    expect(page).toMatch(/<p class="approval-allowing" data-approval-allowing>You’re allowing: file edits and routine commands; anything risky stops · up to \$2\.00 per attempt( · [^<]*)?<\/p><div class="approval-act"/);
+    expect(page).not.toContain("runaway breaker");
     expect(page).toContain("also refuse zero");
     const approveForm = /<form method="post" action="[^"]*\/approve" class="approve-form approval-sheet" id="approve"[^>]*>(.*?)<\/form>/s.exec(page)?.[1] ?? "";
     // One sentence in view; the lineage and inherited terms in Details.
@@ -1806,6 +1808,9 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(drafted).toContain("risks &amp; mitigations");
     expect(drafted).toContain("proof of done");
     expect(drafted).toContain("Edit plan");
+    // Editing the plan in place keeps a road to the written steps' own editor.
+    expect(drafted).toContain('<button type="submit" form="plan-editor-form">Save plan</button><a class="approval-link" href="#plan-edit">Edit steps</a>');
+    expect(drafted).toContain('id="plan-edit"');
     expect(drafted).toContain('class="approve-form approval-sheet"');
     expect(drafted).toContain("The negotiated goal");
     expect(drafted).not.toContain('data-card-kind="result-receipt"');
