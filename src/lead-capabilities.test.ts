@@ -18,6 +18,7 @@ import { addToolTo } from "./project-tools.js";
 import { changeSkills, importSkill, skillsView } from "./project-skills.js";
 import { setProjectCheckLevel } from "./check-levels.js";
 import { CAPABILITIES_UNREAD } from "./lead-capabilities.js";
+import { pauseForAuth } from "./provider-auth.js";
 import type { Integration } from "./integrations.js";
 
 const T0 = new Date("2026-10-02T12:00:00.000Z");
@@ -36,7 +37,7 @@ describe("the lead checks a capability before it claims it", () => {
   let who: VerifiedApprover;
   let drafted: number;
   let dir: string, REPO: string, OTHER: string;
-  const ctx = (step: number, extra: Partial<MateToolContext> = {}, now = T0): MateToolContext => ({ store, who, now, step, readDecisions: new Map(), draft: () => ++drafted, integrations: () => INTEGRATIONS, ...extra });
+  const ctx = (step: number, extra: Partial<MateToolContext> = {}, now = T0): MateToolContext => ({ store, who, now, step, readDecisions: new Map(), draft: () => ++drafted, integrations: () => INTEGRATIONS, authMode: () => "subscription", ...extra });
   const read = (now = T0, repo = "r1"): Read => {
     const result = executeMateTool(ctx(1, {}, now), "get_capabilities", { repo });
     if (!result.ok) throw new Error(result.message);
@@ -129,6 +130,57 @@ describe("the lead checks a capability before it claims it", () => {
     expect(executeMateTool(ctx(1), "get_capabilities", { repo: "r9" })).toMatchObject({ ok: false });
   });
 
+  test("c1: the review phase's agent is listed; a skill that needs something is not ok; signed out only on a real sign-in failure, and an API key gets the key step", () => {
+    // The review phase on its own agent: listed with its role, beside the plan and build agent.
+    store.setPhaseConfig("installation", "review", "codex", "gpt-5-codex", "fixture", T0);
+    const agents = read().projects[0]!.agents;
+    expect(agents).toEqual([
+      expect.objectContaining({ provider: "claude", model: "sonnet", roles: expect.arrayContaining(["plan", "build"]) }),
+      expect.objectContaining({ provider: "codex", model: "gpt-5-codex", roles: ["review"] }),
+    ]);
+    expect(agents[0]!.roles).not.toContain("review");
+
+    // A skill whose requirements are not yet shown to work can't be relied on: not ok, with its next step and link.
+    const skill = importSkill(store, REPO, "alex", [{ path: "SKILL.md", base64: Buffer.from("---\nname: deploy-notes\ndescription: |\n  Write deploy notes.\ncompatibility: the gh CLI\n---\nUse gh.\n").toString("base64") }], "Uploaded local folder", T0);
+    const view = skillsView(store, REPO, "alex");
+    changeSkills(store, { repo: REPO, actor: "alex", identity: view.identity, revision: view.revision, sha: skill.sha, action: "enable" }, T0);
+    const skills = read().projects[0]!.skills;
+    expect(skills).toEqual([expect.objectContaining({ name: "deploy-notes", state: "Needs the gh CLI", ok: false, link: "skills" })]);
+    linked(skills[0]!);
+
+    // A worker that can't run the agent for a reason that is not a sign-in (words that merely contain "auth" or "key"):
+    // not available, with the worker's own words, never "Signed out" and never a sign-in command.
+    register(store, { name: "laptop", host: "mac", capacity: 2, repos: [REPO], now: T0 });
+    const claudeOf = (extra: Partial<MateToolContext> = {}) => {
+      const result = executeMateTool(ctx(1, extra), "get_capabilities", { repo: "r1" });
+      if (!result.ok) throw new Error(result.message);
+      return (result.body as Read).projects[0]!.agents.find(one => one.provider === "claude")!;
+    };
+    for (const reason of ["installed claude 9.0 (author: anthropic) is outside this build's attested range 1.0–2.0", "`claude --version` exited 1: keychain locked"]) {
+      store.recordProviderReadiness("laptop", [{ provider: "claude", state: "unavailable", reason, probe: "version" }], T0);
+      const agent = claudeOf();
+      expect(agent.state).toBe(`Not available: ${reason}`);
+      expect(agent.next).not.toContain("auth login");
+    }
+    // The login check saying not logged in is a real sign-in failure: the sign-in command.
+    store.recordProviderReadiness("laptop", [{ provider: "claude", state: "unavailable", reason: "`claude auth status` says not logged in", probe: "identity" }], T0);
+    expect(claudeOf()).toMatchObject({ state: "Signed out", next: expect.stringContaining("claude auth login") });
+    // On an API key, that login check says nothing about the key: not signed out, no sign-in command.
+    const onKey = claudeOf({ authMode: () => "api-key" });
+    expect(onKey.state).toBe("Not checked yet");
+    expect(onKey.next).not.toContain("auth login");
+    // A run whose API key stopped working: the key step, not the sign-in command.
+    const ref = store.lookupRef("t1")!.id;
+    pauseForAuth(store, { provider: "claude", authMode: "api-key", runId: 1, taskRef: ref, now: T0 });
+    const paused = claudeOf();
+    expect(paused).toMatchObject({ state: "Needs a working API key", ok: false, link: "providers", next: expect.stringContaining("toolroll keys set claude") });
+    expect(paused.next).not.toContain("auth login");
+    // A key-only provider whose key is missing on the worker: the key step too.
+    store.setPhaseConfig("installation", "review", "openrouter", "openai/gpt-5", "fixture", T0);
+    store.recordProviderReadiness("laptop", [{ provider: "openrouter", state: "unavailable", reason: "OPENROUTER_API_KEY is absent from this runner's environment", probe: "key" }], T0);
+    expect(read().projects[0]!.agents.find(one => one.provider === "openrouter")).toMatchObject({ state: "Needs a working API key", ok: false, next: expect.stringContaining("toolroll keys set openrouter") });
+  });
+
   test("c2: a proposal or promise needing a provider, worker or integration is refused unless get_capabilities ran earlier that turn", () => {
     const checked = new Map<string, number>();
     const turn = (step: number, extra: Partial<MateToolContext> = {}) => ctx(step, { checkedCapabilities: checked, ...extra });
@@ -156,6 +208,24 @@ describe("the lead checks a capability before it claims it", () => {
     const everywhere = new Map<string, number>();
     executeMateTool(ctx(1, { checkedCapabilities: everywhere }), "get_capabilities", {});
     expect(executeMateTool(ctx(2, { checkedCapabilities: everywhere }), "propose_task", { repo: "r2", ...TASK_ARGS })).toMatchObject({ ok: true });
+  });
+
+  test("c2: a read without a project covers only the projects it actually read; a proposal on one it left out is refused", () => {
+    // Ten projects: a read without a project shows the first eight and says so.
+    const repos = Array.from({ length: 10 }, (_, i) => join(dir, `p${i + 1}`));
+    for (const repo of repos) { mkdirSync(repo); execFileSync("git", ["init", "-q", repo]); }
+    const verified = verifyApproverStanding(store, "alex", store.accountOf("alex")!.generation, repos);
+    if (!verified.ok) throw new Error(verified.reason);
+    who = verified.who;
+    const checked = new Map<string, number>();
+    const all = executeMateTool(ctx(1, { checkedCapabilities: checked }), "get_capabilities", {});
+    expect(all.ok && (all.body as Read & { notice?: string })).toMatchObject({ notice: expect.stringContaining("first 8") });
+    expect([...checked.keys()]).toEqual(repos.slice(0, 8));
+    // A project it read: drafted. One it left out: refused until that project is read.
+    expect(executeMateTool(ctx(2, { checkedCapabilities: checked }), "propose_task", { repo: "r8", ...TASK_ARGS })).toMatchObject({ ok: true });
+    expect(executeMateTool(ctx(2, { checkedCapabilities: checked }), "propose_task", { repo: "r9", ...TASK_ARGS })).toEqual({ ok: false, message: CAPABILITIES_UNREAD });
+    executeMateTool(ctx(2, { checkedCapabilities: checked }), "get_capabilities", { repo: "r9" });
+    expect(executeMateTool(ctx(3, { checkedCapabilities: checked }), "propose_task", { repo: "r9", ...TASK_ARGS })).toMatchObject({ ok: true });
   });
 
   test("c3: the contract says to check capabilities before promising, and to investigate a limitation before reporting it", () => {

@@ -17,6 +17,8 @@ import { cancelCommitment, CHECK_RESULTS, type CommitmentChannel, conditionWords
 import { searchMemory } from "./project-memory.js";
 import { integrationsNow, STATE_WORDS, type Integration } from "./integrations.js";
 import { CAPABILITIES_UNREAD, capabilitiesOf, needsCapabilities } from "./lead-capabilities.js";
+import type { AuthMode } from "./keys.js";
+import type { ProviderId } from "./provider.js";
 import { readChatResult, reviewInputProblem, type ReviewSnapshot } from "./chat-review.js";
 import { RESULT_IMAGES_PER_TURN_CAP, selectResultImages, type ResultImagePick } from "./chat-evidence.js";
 import { CHAT_CONTROLS, isChatControl } from "./chat-controls.js";
@@ -83,7 +85,9 @@ export type MateToolContext = {
   searchedMemory?: Map<string, number>;
   /** The integrations as Settings → Integrations shows them; absent: read from the files beside the database. */
   integrations?: () => readonly Integration[];
-  /** Where get_capabilities read this turn (a project path, or "*" for every project) and at which step. A proposal or
+  /** How each provider signs in (its subscription or an API key); absent: read from the keys folder, as a run does. */
+  authMode?: (provider: ProviderId) => AuthMode;
+  /** Which projects get_capabilities read this turn (each project path it covered) and at which step. A proposal or
    * promise whose work needs an agent, a worker or an integration needs a read covering it in an EARLIER step. The
    * conversation loop always passes it; absent (a direct call outside a turn), nothing is checked. */
   checkedCapabilities?: Map<string, number>;
@@ -1298,9 +1302,9 @@ export const MATE_TOOLS: MateTool[] = [
       const repo = args["repo"] === undefined ? null : repoPathOf(ctx.who, args["repo"]);
       if (args["repo"] !== undefined && repo === null) return { ok: false, message: "Choose a project from list_repos." };
       const repos = repo === null ? ctx.who.repos.slice(0, 8) : [repo];
-      const found = capabilitiesOf(ctx.store, { repos, admitted: ctx.who.repos, actor: ctx.who.name, integrations: ctx.integrations?.() ?? integrationsNow(integrationIoOf(ctx)), now: ctx.now });
-      const key = repo ?? "*";
-      if (!ctx.checkedCapabilities?.has(key)) ctx.checkedCapabilities?.set(key, ctx.step);
+      const found = capabilitiesOf(ctx.store, { repos, admitted: ctx.who.repos, actor: ctx.who.name, integrations: ctx.integrations?.() ?? integrationsNow(integrationIoOf(ctx)), ...(ctx.authMode === undefined ? {} : { authMode: ctx.authMode }), now: ctx.now });
+      // Only the projects actually read are covered: a proposal on one left out (past the first eight) still needs its own read.
+      for (const path of repos) if (!ctx.checkedCapabilities?.has(path)) ctx.checkedCapabilities?.set(path, ctx.step);
       return { ok: true, body: {
         projects: found.projects.map(({ repo: path, ...rest }) => ({ repo: `r${ctx.who.repos.indexOf(path) + 1}`, ...rest })),
         workers: found.workers,
@@ -1901,7 +1905,7 @@ function memoryUnsearched(ctx: MateToolContext, name: string, args: Record<strin
 
 /**
  * A proposal or promise whose work needs an agent, a worker or an integration (needsCapabilities) needs get_capabilities
- * read over its project (or every project) in an EARLIER step of this turn, as a proposal needs its memory search: the
+ * read over its project in an EARLIER step of this turn, as a proposal needs its memory search: the
  * lead never promises what it has not checked can run. One that names no project is covered by any read this turn.
  */
 function capabilitiesUnread(ctx: MateToolContext, name: string, args: Record<string, unknown>): MateToolResult | null {
@@ -1909,7 +1913,7 @@ function capabilitiesUnread(ctx: MateToolContext, name: string, args: Record<str
   if (read === undefined || !needsCapabilities(name, args, ctx.channel)) return null;
   const before = (key: string): boolean => { const step = read.get(key); return step !== undefined && step < ctx.step; };
   const named = proposalRepoOf(ctx, args);
-  if (named === null ? [...read.values()].some(step => step < ctx.step) : before(named) || before("*")) return null;
+  if (named === null ? [...read.values()].some(step => step < ctx.step) : before(named)) return null;
   return { ok: false, message: CAPABILITIES_UNREAD };
 }
 

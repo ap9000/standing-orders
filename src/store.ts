@@ -16197,6 +16197,7 @@ export class Store {
         reason: String(row["reason"]),
         runner: String(row["runner"]),
         observedAt: String(row["observed_at"]),
+        probe: String(row["probe"]),
       };
     };
   }

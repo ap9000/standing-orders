@@ -10,6 +10,7 @@ import type { ChatControl } from "./chat-controls.js";
 import { resolveRouteCandidates } from "./agentconfig.js";
 import { authPauseOf, messageCommand, providerName } from "./provider-auth.js";
 import type { ProviderId } from "./provider.js";
+import { readAuthMode, SUBSCRIPTION_CAPABLE, type AuthMode } from "./keys.js";
 import { DEFAULT_LIVENESS_MS } from "./runner.js";
 import { projectToolsOf, secretsSetFor, toolStanding } from "./project-tools.js";
 import { conversationSkills } from "./project-skills.js";
@@ -49,7 +50,7 @@ function routePairs(store: Store, repo: string): { pairs: Map<string, { provider
     if (!pair.roles.includes(ROLE_WORDS[phase])) pair.roles.push(ROLE_WORDS[phase]);
     pairs.set(key, pair);
   };
-  for (const phase of ["plan", "build", "repair"] as const) {
+  for (const phase of ["plan", "build", "repair", "review"] as const) {
     const leg = resolved.candidates[phase];
     add(phase, leg.routine ?? (phase === "repair" ? resolved.candidates.build.routine : null));
     add(phase, leg.strong);
@@ -66,7 +67,7 @@ function outOfBudget(store: Store, provider: string, now: Date): { until: string
   return quota === undefined ? null : { until: quota["reset_at"] == null ? null : String(quota["reset_at"]) };
 }
 
-function agentsOf(store: Store, repo: string, now: Date): Pick<ProjectCapabilities, "agents" | "agentsProblem"> {
+function agentsOf(store: Store, repo: string, now: Date, authMode: (provider: ProviderId) => AuthMode): Pick<ProjectCapabilities, "agents" | "agentsProblem"> {
   const { pairs, problem } = routePairs(store, repo);
   if (problem !== null) {
     return { agents: [], agentsProblem: { name: "Agents", state: "Not set up", ok: false, lets: "plan and build this project's tasks", next: `Choose an exact model for each role: ${problem}`, link: "providers" } };
@@ -76,20 +77,28 @@ function agentsOf(store: Store, repo: string, now: Date): Pick<ProjectCapabiliti
     const name = `${providerName(pair.provider)} · ${pair.model}`;
     const lets = `${pair.roles.join(", ")} this project's tasks`;
     const base = { provider: pair.provider, model: pair.model, roles: pair.roles, name, lets };
+    // Signed out only on a real sign-in failure: a sign-in pause from a run, the worker's login check saying not logged
+    // in, or the key a key-only provider needs missing. A provider on an API key gets the key step, never the sign-in.
     const pause = authPauseOf(store, pair.provider);
-    if (pause !== null) return { ...base, state: "Signed out", ok: false, next: `Sign in: run \`${messageCommand(pause)}\` on this computer; its tasks start again on their own.`, link: "providers" as ChatControl };
+    const mode = pause?.authMode ?? (SUBSCRIPTION_CAPABLE[pair.provider] ? authMode(pair.provider) : "api-key");
+    const key = mode === "api-key";
+    const outWords = key ? "Needs a working API key" : "Signed out";
+    const outNext = (detail: string) => key ? `Save a working API key: run \`${messageCommand({ provider: pair.provider, authMode: "api-key" })}\` on this computer${detail}.` : `Sign in: run \`${messageCommand({ provider: pair.provider, authMode: "subscription" })}\` on this computer${detail}.`;
+    if (pause !== null) return { ...base, state: outWords, ok: false, next: outNext("; its tasks start again on their own"), link: "providers" as ChatControl };
     const seen = readiness(pair.provider);
-    if (seen?.state === "unavailable") {
-      const signedOut = /log(ged)? ?in|sign(ed)? ?in|auth|key/i.test(seen.reason);
-      return { ...base, state: signedOut ? "Signed out" : `Not available: ${seen.reason}`, ok: false,
-        next: signedOut ? `Sign in: run \`${messageCommand({ provider: pair.provider, authMode: "subscription" })}\` on this computer.` : `Fix it on the worker: ${seen.reason}.`, link: "providers" as ChatControl };
+    const authFailed = seen?.state === "unavailable" && (seen.probe === "key" || (seen.probe === "identity" && !key));
+    if (authFailed) return { ...base, state: outWords, ok: false, next: outNext(""), link: "providers" as ChatControl };
+    if (seen?.state === "unavailable" && seen.probe !== "identity") {
+      return { ...base, state: `Not available: ${seen.reason}`, ok: false, next: `Fix it on the worker: ${seen.reason}.`, link: "providers" as ChatControl };
     }
     const spent = outOfBudget(store, pair.provider, now);
     if (spent !== null) return { ...base, state: "Out of plan budget", ok: false, next: spent.until === null ? "Wait for the plan to reset, or choose another agent." : `Wait until ${spent.until}, when the plan resets, or choose another agent.`, link: "providers" as ChatControl };
-    if (seen === null || seen.state === "unknown") {
-      return { ...base, state: "Not checked yet", ok: false, next: seen === null ? "No worker has reported this agent yet: start a worker for this project." : "A worker could not check it without spending; the first task shows whether it works.", link: (seen === null ? "workers" : "providers") as ChatControl };
+    if (seen === null) return { ...base, state: "Not checked yet", ok: false, next: "No worker has reported this agent yet: start a worker for this project.", link: "workers" as ChatControl };
+    // On an API key, only a key check speaks for it: a CLI login check (passed or not) says nothing about the key.
+    if (seen.state !== "ready" || (key && seen.probe !== "key")) {
+      return { ...base, state: "Not checked yet", ok: false, next: key ? "Its API key has not been checked without spending; the first task shows whether it works." : "A worker could not check it without spending; the first task shows whether it works.", link: "providers" as ChatControl };
     }
-    return { ...base, state: "Signed in", ok: true, next: null, link: null };
+    return { ...base, state: key ? "API key set" : "Signed in", ok: true, next: null, link: null };
   });
   return { agents, agentsProblem: null };
 }
@@ -125,7 +134,7 @@ function skillsOf(store: Store, repo: string, actor: string): Capability[] {
     const test = lastSkillTest(store, repo, skill.sha);
     if (test === "failed") return { name: skill.name, state: "Last test failed", ok: false, lets, next: "Read it with get_skills, then fix and test it again on the Skills page.", link: "skills" };
     const needs = skill.requirements.trim();
-    if (needs !== "" && test !== "passed") return { name: skill.name, state: `Needs ${needs.slice(0, 120)}`, ok: true, lets, next: "Make sure what it needs is set up, then test it on the Skills page.", link: "skills" };
+    if (needs !== "" && test !== "passed") return { name: skill.name, state: `Needs ${needs.slice(0, 120)}`, ok: false, lets, next: "Make sure what it needs is set up, then test it on the Skills page.", link: "skills" };
     return { name: skill.name, state: test === "running" ? "Working · test running" : "Working", ok: true, lets, next: null, link: null };
   });
 }
@@ -178,9 +187,10 @@ export function integrationCapabilities(list: readonly Integration[]): Capabilit
 }
 
 /** Every capability, for one project or every admitted one. Read-only and spends nothing. */
-export function capabilitiesOf(store: Store, input: { repos: readonly string[]; admitted: readonly string[]; actor: string; integrations: readonly Integration[]; now: Date }): Capabilities {
+export function capabilitiesOf(store: Store, input: { repos: readonly string[]; admitted: readonly string[]; actor: string; integrations: readonly Integration[]; authMode?: (provider: ProviderId) => AuthMode; now: Date }): Capabilities {
+  const authMode = input.authMode ?? (provider => readAuthMode(provider));
   return {
-    projects: input.repos.map(repo => ({ repo, ...agentsOf(store, repo, input.now), tools: toolsOf(store, repo), skills: skillsOf(store, repo, input.actor), checks: checksOf(store, repo) })),
+    projects: input.repos.map(repo => ({ repo, ...agentsOf(store, repo, input.now, authMode), tools: toolsOf(store, repo), skills: skillsOf(store, repo, input.actor), checks: checksOf(store, repo) })),
     workers: workersOf(store, input.admitted, input.now),
     integrations: integrationCapabilities(input.integrations),
   };
