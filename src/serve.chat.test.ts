@@ -935,7 +935,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain("approve to start");
     expect(html).not.toContain("These are the exact terms");
     // Edit plan opens the task page's sheet with its fields ready to edit.
-    expect(html).toContain('<a class="approval-link" href="/t/a#plan-editor">Edit plan</a><a class="approval-link" href="/chat">Not now</a>');
+    expect(html).toContain('<a class="approval-link" href="/t/a?edit=plan#plan-editor">Edit plan</a><a class="approval-link" href="/chat">Not now</a>');
     expect(html).toContain("Your password signs this approval.");
     expect(html.match(/<button type="submit" data-primary-action>Approve & start<\/button>/g)).toHaveLength(1);
     expect(html).toContain('action="/t/a/approve"');

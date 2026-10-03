@@ -1047,10 +1047,16 @@ describe("the project switcher (board pass): one tap from any screen, forms with
       acceptance: [
         { id: "c1", statement: "Negative payouts are refused.", how: "unit test it", evidence: ["check"] },
         { id: "c2", statement: "The settings panel opens.", how: null, evidence: ["screenshot"] },
+        { id: "c3", statement: "Refusals are logged.", how: "read the log", evidence: ["check"] },
       ],
     });
     const before = store.getScope("t-edit")!;
     const page = await (await fetch(url("/t/t-edit"), { headers: { cookie } })).text();
+    // Edit plan starts folded; arriving to edit (chat's Edit plan) opens it.
+    expect(page).toContain('<details class="approval-edit" id="plan-editor"><summary');
+    expect(await (await fetch(url("/t/t-edit?edit=plan"), { headers: { cookie } })).text()).toContain('<details class="approval-edit" id="plan-editor" open><summary');
+    // No written steps on this plan, so no steps link.
+    expect(page).not.toContain(">Edit steps</a>");
     // The plain consent line, the password's reason, and the in-place editor.
     expect(page).toContain("You’re allowing: file edits and routine commands; anything risky stops · up to $1.50 per attempt</p>");
     expect(page).not.toContain("data-approval-you-check");
@@ -1064,10 +1070,11 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     // Submit exactly what the editor's form carries, with the fields edited.
     const editorForm = page.slice(page.indexOf('<form method="post" action="/t/t-edit/scope" id="plan-editor-form"'));
     const hidden = [...editorForm.slice(0, editorForm.indexOf("</form>")).matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!] as [string, string]);
-    expect(Object.fromEntries(hidden)).toMatchObject({ sawDigest: before.digest, "permission-mode": "auto", "quality-mode": before.qualityMode ?? "default", "budget-usd": "1.5" });
+    expect(Object.fromEntries(hidden)).toMatchObject({ sawDigest: before.digest, "permission-mode": "auto", "quality-mode": before.qualityMode ?? "default", "budget-microusd": "1500000" });
+    expect(Object.keys(Object.fromEntries(hidden))).not.toContain("budget-usd");
     const edit = (fields: [string, string][]) => fetch(url("/t/t-edit/scope"), { method: "POST", headers: { cookie }, body: new URLSearchParams([...hidden, ...fields]), redirect: "manual" });
     // Every requirement cleared: refused, and the editor reopens with the draft and why.
-    const refused = await edit([["goal", "guard it harder"], ["touches", ""], ["not", ""], ["requirement", ""], ["requirement", ""], ["requirement-new", ""]]);
+    const refused = await edit([["goal", "guard it harder"], ["touches", ""], ["not", ""], ["requirement", ""], ["requirement", ""], ["requirement", ""], ["requirement-new", ""]]);
     expect(refused.status).toBe(400);
     const refusedPage = await refused.text();
     expect(refusedPage).toContain('<details class="approval-edit" id="plan-editor" open>');
@@ -1076,27 +1083,87 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(store.getScope("t-edit")?.digest).toBe(before.digest);
     const saved = await edit([
       ["goal", "guard the payout path and log refusals"], ["touches", "src/payout.ts\nsrc/log.ts"], ["not", "billing and sign-in"],
-      ["requirement", "Negative and zero payouts are refused."], ["requirement", ""], ["requirement-new", "The refusal reads plainly"],
+      ["requirement", "Negative and zero payouts are refused."], ["requirement", ""], ["requirement", " Refusals are  logged. "], ["requirement-new", "The refusal reads plainly"],
     ]);
     expect(saved.status).toBe(303);
     const after = store.getScope("t-edit")!;
     expect(after).toMatchObject({ goal: "guard the payout path and log refusals", touches: ["src/payout.ts", "src/log.ts"], outOfScope: "billing and sign-in", budgetMicrousd: 1_500_000, qualityMode: before.qualityMode, approvedAt: null });
-    // Ids, evidence and guidance kept by position; the cleared one dropped; the added one is yours to check.
+    // Ids kept by position; an unchanged one keeps its evidence and guidance; a rewritten one
+    // drops them and, like an added one, is yours to check; the cleared one is dropped.
     expect(after.acceptance).toEqual([
-      { id: "c1", statement: "Negative and zero payouts are refused.", how: "unit test it", evidence: ["check"] },
-      { id: "c3", statement: "The refusal reads plainly", how: null, evidence: ["manual-review"] },
+      { id: "c1", statement: "Negative and zero payouts are refused.", how: null, evidence: ["manual-review"] },
+      { id: "c3", statement: "Refusals are logged.", how: "read the log", evidence: ["check"] },
+      { id: "c4", statement: "The refusal reads plainly", how: null, evidence: ["manual-review"] },
     ]);
     expect(after.profile).toMatchObject({ provider: "claude", permissionArgv: "auto" });
     expect(after.digest).not.toBe(before.digest);
     // The seal is unchanged: the new wording approves only through the password ceremony, bound to its digest.
     const edited = await (await fetch(url("/t/t-edit"), { headers: { cookie } })).text();
-    expect(edited).toContain('<p class="approval-you-check" data-approval-you-check>You’ll check: The refusal reads plainly</p>');
+    expect(edited).toContain('<p class="approval-you-check" data-approval-you-check>You’ll check: Negative and zero payouts are refused; The refusal reads plainly</p>');
     const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(edited)?.[1] ?? "";
     const digest = /name="digest" value="([0-9a-f]+)"/.exec(edited)?.[1] ?? "";
     expect(digest).toBe(after.digest);
     const approved = await fetch(url("/t/t-edit/approve"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf: csrfOf(edited), nonce, digest, token: approverToken }), redirect: "manual" });
     expect(approved.status).toBe(303);
     expect(store.getScope("t-edit")).toMatchObject({ approvedDigest: after.digest, approvedBy: "alex" });
+  });
+
+  test("Edit plan in place keeps what it doesn't show: a stale draft stays stale, permissions never change, the cap round-trips exactly", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    await fetch(url("/projects/open"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf: csrfOf(home), path: repoA, return: "/" }), redirect: "manual" });
+    store.createTask({ id: "t-keep", title: "keep the terms" }, T0);
+    store.placeTask(store.refFor("built-in", "t-keep").id, repoA);
+    const acceptance = [{ id: "c1", statement: "Negative payouts are refused.", how: null, evidence: ["check" as const] }];
+    propose(store, { taskId: "t-keep", goal: "guard the payout path", acceptance, now: T0 });
+    const editorOf = async () => {
+      const page = await (await fetch(url("/t/t-keep"), { headers: { cookie } })).text();
+      const form = page.slice(page.indexOf('<form method="post" action="/t/t-keep/scope" id="plan-editor-form"'));
+      return { page, hidden: [...form.slice(0, form.indexOf("</form>")).matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!] as [string, string]) };
+    };
+    const save = (hidden: [string, string][], goal: string) => fetch(url("/t/t-keep/scope"), { method: "POST", headers: { cookie },
+      body: new URLSearchParams([...hidden, ["goal", goal], ["touches", ""], ["not", ""], ["requirement", "Negative payouts are refused."], ["requirement-new", ""]]), redirect: "manual" });
+
+    // No limit stays no limit; an odd cap comes back to the millionth.
+    const open = await editorOf();
+    expect(open.page).toContain(" · no attempt limit</p>");
+    expect(Object.fromEntries(open.hidden)["budget-microusd"]).toBe("none");
+    expect((await save(open.hidden, "guard the payout path, plainly")).status).toBe(303);
+    expect(store.getScope("t-keep")?.budgetMicrousd).toBeNull();
+    propose(store, { taskId: "t-keep", goal: "guard the payout path", acceptance, budgetMicrousd: 1_234_567, now: T0 });
+    const capped = await editorOf();
+    expect(Object.fromEntries(capped.hidden)["budget-microusd"]).toBe("1234567");
+    expect((await save(capped.hidden, "guard the payout path, again")).status).toBe(303);
+    expect(store.getScope("t-keep")?.budgetMicrousd).toBe(1_234_567);
+
+    // A draft edited from an older version is refused, and stays bound to
+    // that version when it reopens: saving it again is refused again.
+    const stale = await editorOf();
+    propose(store, { taskId: "t-keep", goal: "someone else's wording", acceptance, now: T0 });
+    const current = store.getScope("t-keep")!.digest;
+    const refused = await save(stale.hidden, "my wording");
+    expect(refused.status).toBe(409);
+    const reopened = await refused.text();
+    expect(reopened).toContain('<details class="approval-edit" id="plan-editor" open>');
+    const retried = /<form method="post" action="\/t\/t-keep\/scope" id="plan-editor-form"[^]*?<\/form>/.exec(reopened)?.[0] ?? "";
+    const again = [...retried.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!] as [string, string]);
+    expect(Object.fromEntries(again)["sawDigest"]).toBe(Object.fromEntries(stale.hidden)["sawDigest"]);
+    expect(Object.fromEntries(again)["sawDigest"]).not.toBe(current);
+    expect((await save(again, "my wording")).status).toBe(409);
+    expect(store.getScope("t-keep")).toMatchObject({ goal: "someone else's wording", digest: current });
+
+    // A legacy accept-edits plan: saving in place never raises what the agent may do.
+    const resolved = store.getScope("t-keep")!.profile!;
+    if (resolved.provider !== "claude") throw new Error("expected a claude profile");
+    propose(store, { taskId: "t-keep", goal: "guard the payout path", acceptance, now: T0, profile: { ...resolved, permissionArgv: "acceptEdits" } });
+    const legacy = store.getScope("t-keep")!;
+    expect(legacy.profile).toMatchObject({ permissionArgv: "acceptEdits" });
+    const kept = await editorOf();
+    expect(kept.page).toContain("You’re allowing: file edits only; commands are refused");
+    const raised = await save(kept.hidden, "guard the payout path, edited");
+    expect(raised.status).toBe(409);
+    expect(await raised.text()).toContain("Not saved: this would change what the agent may do.");
+    expect(store.getScope("t-keep")).toMatchObject({ goal: "guard the payout path", digest: legacy.digest, profile: { permissionArgv: "acceptEdits" } });
   });
 
   test("a sensitive page renders the switcher inert: the name and the one link, no forms in the chrome", async () => {

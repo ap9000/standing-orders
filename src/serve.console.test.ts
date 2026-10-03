@@ -1807,6 +1807,9 @@ describe("the board — the pipeline as lanes, live in place", () => {
     expect(drafted).toContain("risks &amp; mitigations");
     expect(drafted).toContain("proof of done");
     expect(drafted).toContain("Edit plan");
+    // Editing the plan in place keeps a road to the written steps' own editor.
+    expect(drafted).toContain('<button type="submit" form="plan-editor-form">Save plan</button><a class="approval-link" href="#plan-edit">Edit steps</a>');
+    expect(drafted).toContain('id="plan-edit"');
     expect(drafted).toContain('class="approve-form approval-sheet"');
     expect(drafted).toContain("The negotiated goal");
     expect(drafted).not.toContain('data-card-kind="result-receipt"');

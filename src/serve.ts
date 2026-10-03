@@ -316,7 +316,7 @@ import { parseProjectConcurrency, PROJECT_CONCURRENCY_DEFAULT, projectConcurrenc
 import { buildReviewOf, findingWords, type BuildReviewView } from "./review-switch.js";
 import { deleteProject, holdingsWords, projectHoldings, projectRunning } from "./project-delete.js";
 import { POLICY_CSS, policyHtml } from "./policy-ui.js";
-import { checkPolicy, parseList, policyParts } from "./policy.js";
+import { checkPolicy, levelOfProfile, parseList, policyParts } from "./policy.js";
 import { LIMITS_CSS, limitsHtml, limitsView } from "./limits-ui.js";
 import { budgetHoldWords, budgetLabel, budgetStates, monthNamed, monthOf, spendItems, teammateNames as teammateNamesOf, usd as spendUsd } from "./spend.js";
 import { targetOf } from "./monitoring.js";
@@ -3120,7 +3120,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const version = url.searchParams.get("version");
       if (version !== null && !family.versions.some(one => one.id === version)) return refuse(response, who, 404, "That version is not available for this task.", taskHref(family.root.id));
       if (task.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}?version=${encodeURIComponent(task.taskId)}`);
-      return taskScreen(response, who, version ?? family.current.id, null, 200);
+      return taskScreen(response, who, version ?? family.current.id, null, 200, undefined, undefined, url.searchParams.get("edit") === "plan");
     }
 
     // v103: a task's evidence pack, as a printable page or JSON (the whole family, sealed ledger entries included).
@@ -6110,6 +6110,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     status: number,
     scopeDraft?: URLSearchParams,
     cancelDraft?: string,
+    editPlan = false,
   ): void {
     const admittedFamily = familyOf(taskId);
     if (admittedFamily?.problem != null) return sendScreen(response, status, screen(admittedFamily.root.title,
@@ -6122,6 +6123,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       versionLabel: family !== null && family.current.id !== taskId ? `Viewing ${family.versions.findIndex(one => one.id === taskId) === 0 ? "Original" : `Revision ${family.versions.findIndex(one => one.id === taskId)}`} · ${family.current.state === "running" ? "A newer revision is running" : "A newer revision is current"}` : null };
     if (scopeDraft !== undefined) presentedData.scopeDraft = scopeDraft;
     if (cancelDraft !== undefined) presentedData.cancelDraft = cancelDraft;
+    if (editPlan) presentedData.editPlan = true;
     (presentedData as { pullRequest?: TaskPullRequest | null }).pullRequest = taskPullRequestOf(taskId, who);
     // The thread reads the whole family: the original, its revisions, and every attempt across them.
     if (family !== null && family.problem === null) {
@@ -10593,6 +10595,12 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         if (budgetUsd !== null && (!Number.isFinite(budgetUsd) || budgetUsd <= 0)) {
           return taskScreen(response, who, taskId, "the dollar cap is a positive amount", 400);
         }
+        // The approval sheet's in-place editor carries the cap it was shown
+        // exactly, in millionths, and "none" for no limit (never a default).
+        const exactBudgetGiven = body.get("budget-microusd");
+        const exactBudget = exactBudgetGiven === null ? undefined : exactBudgetGiven === "none" ? null : /^[1-9][0-9]{0,14}$/.test(exactBudgetGiven) ? Number(exactBudgetGiven) : NaN;
+        if (Number.isNaN(exactBudget)) return taskScreen(response, who, taskId, "the dollar cap is a positive amount", 400);
+        const inPlace = body.has("requirement-new");
         // The tournament controls (operator request): a count of 2–4 files
         // race terms BESIDE the scope — validated and priced BEFORE anything
         // saves, so a bad tournament never half-lands on a good scope.
@@ -10647,7 +10655,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         if (plannedRace !== null && store.mirrorByTask(taskId) !== null) {
           return taskScreen(response, who, taskId, "external work races in a follow-up release — file the tournament on a local task", 409);
         }
-        const saved = store.transact(():
+        let saved: { ok: true } | { ok: false; status: number; message: string };
+        try { saved = store.transact(():
           | { ok: true }
           | { ok: false; status: number; message: string } => {
           if ((plannedRace !== null || plannedComparison !== null) && store.openAuthorizationFor(ref.id) !== null) {
@@ -10665,18 +10674,21 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
             who.via === "cookie" && plannedRace === null && plannedComparison === null
               ? modeFilingCoverage(store, ref.repo, who.name, now)
               : null;
+          const before = store.getScope(taskId);
           const proposed = proposeGuarded(store, {
             taskId, author: who.name,
             goal: body.has("goal-brief") ? `${(body.get("goal") ?? "").trim()}${body.get("goal-brief")}` : body.get("goal") ?? "",
             outOfScope: body.get("not") ?? null,
             touches: (body.get("touches") ?? "").split(/[\n,]/),
             // The approval sheet's in-place editor sends Done when line by line.
-            acceptance: body.has("requirement-new")
-              ? requirementsFromEditor(body, store.getScope(taskId)?.acceptance ?? [])
+            acceptance: inPlace
+              ? requirementsFromEditor(body, before?.acceptance ?? [])
               : acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")),
             permissionMode,
             qualityMode,
-            ...(budgetUsd !== null
+            ...(exactBudget !== undefined
+              ? exactBudget === null ? {} : { budgetMicrousd: exactBudget }
+              : budgetUsd !== null
               ? { budgetMicrousd: Math.round(budgetUsd * 1_000_000) }
               : coverage?.defaultBudgetMicrousd != null
                 ? { budgetMicrousd: coverage.defaultBudgetMicrousd }
@@ -10692,6 +10704,12 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
               status: proposed.reason === "changed" || proposed.reason === "claimed" ? 409 : 400,
               message: proposed.message ?? (proposed.reason === "acceptance-required" ? "Not saved: add at least one requirement under Done when." : `scope not saved: ${proposed.reason}`),
             };
+          }
+          // Editing the plan in place never changes what the agent may do:
+          // a save that would (a legacy setting, a newer policy or mode)
+          // rolls back whole.
+          if (inPlace && before?.profile != null && proposed.scope.profile != null && levelOfProfile(before.profile) !== levelOfProfile(proposed.scope.profile)) {
+            throw new PermissionsWouldChange();
           }
           if (coverage !== null && ref.plan === "requested") {
             authorizePlanUnderMode(store, taskId, who.name, now);
@@ -10743,7 +10761,10 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
             now,
           );
           return { ok: true };
-        });
+        }); } catch (error) {
+          if (!(error instanceof PermissionsWouldChange)) throw error;
+          saved = { ok: false, status: 409, message: "Not saved: this would change what the agent may do. Change permissions in Details, under edit the scope." };
+        }
         if (!saved.ok) return taskScreen(response, who, taskId, saved.message, saved.status, body);
         return redirect(response, taskHref(taskId));
       }
@@ -12135,10 +12156,11 @@ function approvalSheetHtml(input: {
   editHref: string;
   notNowHref: string;
   sticky: boolean;
-  /** Earlier versions of this task still queued or running. */
-  earlierActive: number;
-  /** The in-place editor (task page): the scope route, and a draft the server refused, with why. */
-  edit: { action: string; draft: URLSearchParams | null; problem: string | null } | null;
+  /** Earlier versions of this task still queued or running, and how many of them are running. */
+  earlier: { active: number; running: number };
+  /** The in-place editor (task page): the scope route, a draft the server
+   * refused (with why), whether it opens on arrival, and the plan's steps editor. */
+  edit: { action: string; draft: URLSearchParams | null; problem: string | null; open: boolean; stepsHref: string | null } | null;
 }): string {
   const { scope, route, raceTerms } = input;
   // A machine-drafted repair appends its brief to the signed goal; the row
@@ -12185,7 +12207,8 @@ function approvalSheetHtml(input: {
   const allowed = permissionPlainWordsOf(scope.profile);
   if (allowed !== null) allowing.push(allowed);
   if (raceTerms === null) allowing.push(scope.budgetMicrousd === null ? "no attempt limit" : `up to ${money(scope.budgetMicrousd)} per attempt`);
-  if (input.earlierActive > 0) allowing.push(input.earlierActive === 1 ? "an earlier version is still running" : `${input.earlierActive} earlier versions are still running`);
+  const earlier = earlierVersionsWords(input.earlier.active, input.earlier.running);
+  if (earlier !== null) allowing.push(earlier);
   const yoursToCheck = scope.acceptance.filter(one => one.evidence.includes("manual-review")).map(one => one.statement.trim().replace(/[.\s]+$/, ""));
   const consent =
     (allowing.length === 0 ? "" : `<p class="approval-allowing" data-approval-allowing>You’re allowing: ${allowing.map(escape).join(" · ")}</p>`) +
@@ -12264,7 +12287,7 @@ function approvalSheetHtml(input: {
   const requirements = draft?.getAll("requirement") ?? scope.acceptance.map(one => one.statement);
   const added = draft?.get("requirement-new") ?? "";
   const editor = edit === null ? null :
-    `<details class="approval-edit" id="plan-editor"${draft === null ? "" : " open"}>` +
+    `<details class="approval-edit" id="plan-editor"${draft === null && !edit.open ? "" : " open"}>` +
     `<summary class="approval-link"><span class="approval-edit-open">Edit plan</span><span class="approval-edit-close">Cancel</span></summary>` +
     `<div class="approval-editor">` +
     (edit.problem === null ? "" : `<p class="problem" role="alert">${escape(edit.problem)}</p>`) +
@@ -12276,19 +12299,24 @@ function approvalSheetHtml(input: {
     requirements.map((one, index) => requirement("requirement", one, `Requirement ${index + 1}`)).join("") +
     requirement("requirement-new", added, "Add a requirement", "Add a requirement") +
     `</ul></fieldset>` +
-    `<div class="approval-edit-act"><button type="submit" form="${editForm}">Save plan</button></div>` +
+    `<div class="approval-edit-act"><button type="submit" form="${editForm}">Save plan</button>` +
+    // A plan with written steps keeps its own editor for them.
+    (edit.stepsHref === null ? "" : `<a class="approval-link" href="${escape(edit.stepsHref)}">Edit steps</a>`) + `</div>` +
     `</div></details>`;
   const keptMode = permissionModeOfProfile(scope.profile);
   const editorForm = edit === null ? "" :
     `<form method="post" action="${edit.action}" id="${editForm}" class="approval-editor-form">` +
     `<input type="hidden" name="csrf" value="${escape(input.csrf)}">` +
-    `<input type="hidden" name="sawDigest" value="${escape(scope.digest)}">` +
+    // A refused save keeps the version its draft was edited from, so a
+    // plan that changed meanwhile is never silently overwritten.
+    `<input type="hidden" name="sawDigest" value="${escape(draft?.get("sawDigest") ?? scope.digest)}">` +
     // The terms the editor doesn't show ride along unchanged: a repair's
     // brief after its goal (it stays in Details), permissions, checks, cap.
     (repairText === null ? "" : `<input type="hidden" name="goal-brief" value="${escape(repairText[0])}">`) +
     (keptMode === null ? "" : `<input type="hidden" name="permission-mode" value="${keptMode}">`) +
     `<input type="hidden" name="quality-mode" value="${escape(scope.qualityMode ?? "default")}">` +
-    `<input type="hidden" name="budget-usd" value="${scope.budgetMicrousd === null ? "" : String(scope.budgetMicrousd / 1_000_000)}">` +
+    // The cap rides in exact millionths ("none" keeps no limit).
+    `<input type="hidden" name="budget-microusd" value="${scope.budgetMicrousd === null ? "none" : String(scope.budgetMicrousd)}">` +
     `</form>`;
 
   return (
@@ -12324,6 +12352,17 @@ function approvalSheetHtml(input: {
   );
 }
 
+/** Earlier versions of a task still in flight, in plain words: queued
+ * while they only wait, running once one has started; null when none. */
+export function earlierVersionsWords(active: number, running: number): string | null {
+  if (active <= 0) return null;
+  const still = running >= active ? "running" : running <= 0 ? "queued" : "queued or running";
+  return active === 1 ? `an earlier version is still ${still}` : `${active} earlier versions are still ${still}`;
+}
+
+/** An in-place plan edit that would change the agent's permissions: thrown to roll the save back. */
+class PermissionsWouldChange extends Error {}
+
 /** Evidence kinds in plain words, for the signed criteria in Details. */
 const EVIDENCE_PLAIN: Record<string, string> = { check: "the project check", screenshot: "screenshots", "changed-path": "changed files", "manual-review": "your own check" };
 
@@ -12351,8 +12390,9 @@ function permissionModeOfProfile(profile: Scope["profile"] | null | undefined): 
 }
 
 /** Done when, from the in-place editor: each line keeps its requirement's
- * id and evidence by position; an emptied one is dropped; an added one is
- * yours to check. */
+ * id by position, and its evidence and guidance while its words stand; a
+ * rewritten one is yours to check, like an added one; an emptied one is
+ * dropped. */
 function requirementsFromEditor(body: URLSearchParams, current: readonly AcceptanceCriterion[]): unknown[] {
   const used = new Set(current.map(one => one.id));
   let next = 1;
@@ -12361,7 +12401,10 @@ function requirementsFromEditor(body: URLSearchParams, current: readonly Accepta
   const kept = body.getAll("requirement").slice(0, current.length).flatMap((raw, index) => {
     const statement = plain(raw);
     const criterion = current[index]!;
-    return statement === "" ? [] : [{ id: criterion.id, statement, evidence: [...criterion.evidence], how: criterion.how }];
+    if (statement === "") return [];
+    return statement === plain(criterion.statement)
+      ? [{ id: criterion.id, statement: criterion.statement, evidence: [...criterion.evidence], how: criterion.how }]
+      : [{ id: criterion.id, statement, evidence: ["manual-review" as const], how: null }];
   });
   const added = plain(body.get("requirement-new") ?? "");
   return added === "" ? kept : [...kept, { id: `c${next}`, statement: added, evidence: ["manual-review"], how: null }];
@@ -14029,6 +14072,7 @@ ${THEME_DARK}
   .approval-field-hint { color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
   .approval-field textarea, .approval-field input[type=text] { width: 100%; max-width: 75ch; margin: 0; font-family: var(--font-sans); font-size: 14px; line-height: 1.55; }
   .approval-requirements { display: grid; gap: 6px; margin: 2px 0 0; padding: 0; list-style: none; }
+  .approval-edit-act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .approval-edit-act button { margin: 0; min-height: 2.125rem; white-space: nowrap; }
   .approval-link { display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--foreground); font-size: 13px; font-weight: 500; text-decoration: none; }
   .approval-secondary > .approval-link:not(:first-child) { border-color: transparent; background: none; color: var(--muted-foreground); }
@@ -17388,11 +17432,11 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
       route: focus.route,
       coordinator: approval.coordinator,
       deliverable: approval.deliverable,
-      // Edit plan opens the task page's sheet with its fields ready to edit.
-      editHref: `${taskHref(focus.id)}#${approval.raceTerms !== null ? approval.planDocument === null ? "scope" : "plan-edit" : "plan-editor"}`,
+      // Edit plan opens the task page's sheet with its fields open for editing.
+      editHref: approval.raceTerms !== null ? `${taskHref(focus.id)}#${approval.planDocument === null ? "scope" : "plan-edit"}` : `${taskHref(focus.id)}?edit=plan#plan-editor`,
       notNowHref: "/chat",
       sticky: false,
-      earlierActive: focus.assignment?.earlierActive ?? 0,
+      earlier: { active: focus.assignment?.earlierActive ?? 0, running: focus.assignment?.earlierRunning ?? 0 },
       edit: null,
     }) +
     `</section>`
@@ -21090,6 +21134,8 @@ function taskBodyParts(data: {
   csrf: string;
   nonce: string;
   scopeDraft?: URLSearchParams;
+  /** Arrived to edit the plan (?edit=plan): the approval sheet opens its editor. */
+  editPlan?: boolean;
   cancelDraft?: string;
   problem: string | null;
   /** The attended road (Phase 2E): mint offer, or the open authorization. */
@@ -21648,10 +21694,11 @@ function taskBodyParts(data: {
           editHref: data.csrf !== "" && data.planSha != null && data.planDocument !== null ? "#plan-edit" : "#scope",
           notNowHref: "/work",
           sticky: data.dispatch?.action === "approve-scope",
-          earlierActive: data.assignment?.earlierActive ?? 0,
+          earlier: { active: data.assignment?.earlierActive ?? 0, running: data.assignment?.earlierRunning ?? 0 },
           // A tournament's terms live in the full scope editor; every other plan edits in place.
           edit: data.csrf === "" || (data.raceTerms ?? null) !== null ? null
-            : { action: `${taskHref(task.id)}/scope`, draft: inlineScopeDraft ? data.scopeDraft ?? null : null, problem: inlineScopeDraft ? data.problem : null },
+            : { action: `${taskHref(task.id)}/scope`, draft: inlineScopeDraft ? data.scopeDraft ?? null : null, problem: inlineScopeDraft ? data.problem : null,
+              open: data.editPlan === true, stepsHref: data.planSha != null && data.planDocument !== null ? "#plan-edit" : null },
         });
 
   // The attended road (Phase 2E): beside the approval, never replacing it.
