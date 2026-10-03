@@ -60,6 +60,15 @@ describe("the lead checks before it speaks", () => {
     expect(executeMateTool(ctx(3, { searchedMemory: searched }), "propose_steer", { task: "s1", note: "Start with the form." })).toMatchObject({ ok: true });
   });
 
+  test("c1: propose_steer on a task resolves its project from the task: one search of that project is enough", () => {
+    recordDecision(store, { repo: OPEN, actor: "alex", draft: { claim: "Sign-up stays email only", why: "Fewer accounts to recover." } }, T0);
+    const searched = new Map<string, number>();
+    executeMateTool(ctx(1, { searchedMemory: searched }), "search_project_memory", { query: "refunds", repo: "r1" });
+    expect(executeMateTool(ctx(2, { searchedMemory: searched }), "propose_steer", { task: "s1", note: "Start with the form." })).toMatchObject({ ok: true });
+    // The other project's task still needs its own project searched.
+    expect(executeMateTool(ctx(2, { searchedMemory: searched }), "propose_steer", { task: "o1", note: "Start with the form." })).toMatchObject({ ok: false, message: expect.stringContaining("This project has recorded decisions") });
+  });
+
   test("c1: a search over another project does not count; a search over every project does; a project without decisions needs none", () => {
     const searched = new Map<string, number>();
     executeMateTool(ctx(1, { searchedMemory: searched }), "search_project_memory", { query: "refunds", repo: "r2" });
@@ -150,6 +159,15 @@ describe("the lead checks before it speaks", () => {
     expect(store.mateAsk(first)).not.toBeNull();
     const failed = turn(false);
     expect(store.mateAsk(failed)).toBeNull();
+    // Answered stays answered once the answering message is removed (as retention does): the later turn shows it.
+    const asked = turn(true);
+    const at = new Date(T0.getTime() + 60_000);
+    const opened = store.openMateTurn({ approver: "alex", session: session.id, thread: thread.id, credentialKey: "k", reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, at);
+    if (!opened.ok) throw new Error(opened.reason);
+    const answer = store.appendMateMessage({ thread: thread.id, turn: opened.id, role: "operator", text: "Signup" }, at);
+    expect(store.mateAskState(asked, at).state).toBe("answered");
+    store.handle.prepare("DELETE FROM mate_message WHERE id = ?").run(answer);
+    expect(store.mateAskState(asked, at).state).toBe("answered");
   });
 
   test("c2: a question is open, then answered or expired; its rows never block a purge of the turn or the reply", () => {

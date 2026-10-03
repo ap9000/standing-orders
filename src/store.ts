@@ -23765,14 +23765,17 @@ export class Store {
     return { turn: Number(row["turn"]), thread: Number(row["thread"]), question: String(row["question"]), options: Array.isArray(options) ? options.map(String) : [], createdAt: String(row["created_at"]) };
   }
 
-  /** What a tap on the question finds: open; answered (the owner has written in its thread since the reply that asked it);
-   * or expired (older than MATE_ASK_TTL_MS, or the question or the reply that asked it is gone, as after a retention purge). */
+  /** What a tap on the question finds: open; answered (the owner has written in its thread since the reply that asked it,
+   * or a later turn there shows they did, even once retention removed that message); or expired (older than
+   * MATE_ASK_TTL_MS, or the question or the reply that asked it is gone, as after a retention purge). */
   mateAskState(turn: number, now: Date): { state: "open"; ask: MateAsk } | { state: "answered" | "expired" } {
     const ask = this.mateAsk(turn);
     if (ask === null) return { state: "expired" };
     const asking = this.db.prepare("SELECT MAX(id) AS id FROM mate_message WHERE thread = ? AND turn = ? AND role = 'assistant'").get(ask.thread, turn);
     if (asking === undefined || asking["id"] === null) return { state: "expired" };
-    const later = this.db.prepare("SELECT 1 AS hit FROM mate_message WHERE thread = ? AND role = 'operator' AND id > ? LIMIT 1").get(ask.thread, Number(asking["id"]));
+    const later = this.db.prepare("SELECT 1 AS hit FROM mate_message WHERE thread = ? AND role = 'operator' AND id > ? LIMIT 1").get(ask.thread, Number(asking["id"]))
+      ?? this.db.prepare(`SELECT 1 AS hit FROM mate_turn t JOIN mate_turn asked ON asked.id = ? WHERE t.thread = ? AND t.id > asked.id
+          AND t.created_at >= asked.finished_at LIMIT 1`).get(turn, ask.thread);
     if (later !== undefined) return { state: "answered" };
     if (new Date(ask.createdAt).getTime() + MATE_ASK_TTL_MS <= now.getTime()) return { state: "expired" };
     return { state: "open", ask };
@@ -27162,8 +27165,11 @@ export class Store {
           JOIN push_subscription s ON s.id = p.subscription JOIN notification n ON n.id = p.notification
           WHERE p.state = 'pending' AND p.attempts = 0 AND p.created_at = ?`).all(now.toISOString());
       for (const raw of fresh) {
-        if (!this.pingAllowed(readNotification(raw), String(raw["approver"]))) {
-          this.db.prepare("UPDATE push_delivery SET state = 'retired', last_error = 'quiet' WHERE id = ? AND state = 'pending'").run(Number(raw["pair"]));
+        // A met promise is said on the chat it was made on (lead-commitments.ts), never as a push: settled here, unsent.
+        const elsewhere = String(raw["dedupe_key"]).startsWith("lead-promise:");
+        if (elsewhere || !this.pingAllowed(readNotification(raw), String(raw["approver"]))) {
+          this.db.prepare("UPDATE push_delivery SET state = 'retired', last_error = ? WHERE id = ? AND state = 'pending'")
+            .run(elsewhere ? TELEGRAM_SKIPPED_OTHER_CHAT : "quiet", Number(raw["pair"]));
         }
       }
     }

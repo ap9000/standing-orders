@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { MATE_ASK_TTL_MS, openStore, type Store } from "./store.js";
-import { chatAskButtons } from "./chat-ask.js";
+import { applyChatAskTap, chatAskButtons } from "./chat-ask.js";
 import { addApprover, propose, approve } from "./scope.js";
 import { SlackState, slackHash, type SlackContent } from "./slack-state.js";
 import {
@@ -1221,10 +1221,24 @@ describe("Slack shared chat", () => {
     const second = askPart();
     const unit = buttonsOf(sends().at(-1)!)[0]!.value!;
     const turns = (runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+    // A tap under a binding whose person is not the one the lead asked is ignored: nothing said, nothing used up.
+    const binding = state.bindingFor(ID.installation, MEMBER)!;
+    state.enqueue({ id: "other-approver-tap", installation: ID.installation, binding: binding.id, kind: "action", channel: CHANNEL, member: MEMBER, ts: String(second.message), thread: THREAD, payload: "{}", created: now.toISOString() });
+    expect(store.transact(() => applyChatAskTap({ store, state }, state.event("other-approver-tap")!, { ...binding, approver: "sam" }, unit, now))).toBe(true);
+    expect(state.db.prepare("SELECT COUNT(*) AS n FROM slack_part WHERE event='other-approver-tap'").get()!.n).toBe(0);
+    expect(state.event("other-approver-tap")!.state).toBe("done");
+    expect(chatAskButtons(state, Number(second.id), now)).toHaveLength(3);
     now = new Date(now.getTime() + MATE_ASK_TTL_MS);
     state.lease(ID.installation, "test", now);
     await press(unit, String(second.message));
-    expect(sends().at(-1)!).toMatchObject({ method: "chat.postMessage", args: { text: "This question expired. If it still matters, send your answer as a message." } });
+    // The question itself is repainted without its buttons, so a later tap has nothing to press and posts nothing.
+    const expiredCard = sends().at(-1)!;
+    expect(expiredCard).toMatchObject({ method: "chat.update", args: { ts: String(second.message), text: expect.stringContaining("This question expired. If it still matters, send your answer as a message.") } });
+    expect(buttonsOf(expiredCard)).toEqual([]);
+    const sent = sends().length;
+    await press(unit, String(second.message));
+    expect(sends().slice(sent).filter(one => one.method === "chat.postMessage")).toEqual([]);
+    expect(sends().slice(sent).every(one => !String(one.args.text).endsWith("send your answer as a message.\n\nThis question expired. If it still matters, send your answer as a message."))).toBe(true);
     await processSlackEvent(options);
     expect((runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(turns);
     // Deleting a part (and the turn) is never blocked by its buttons.

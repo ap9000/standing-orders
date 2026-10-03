@@ -116,9 +116,10 @@ export function leadSubjectOf(store: Store, row: Pick<Notification, "kind" | "su
   return row.kind === LEAD_SAY_KIND ? name : row.kind === LEAD_ON_IT_KIND ? `${name} is on it` : leadLapsed(name);
 }
 
-/** The words a chat shows for a lead-say row: the lead's name, then each line, plain, with no task id. */
-export function leadSayText(store: Store, row: Pick<Notification, "kind" | "subject" | "body" | "recipient">): string {
-  return chatText([plain(leadSubjectOf(store, row), 60), "", ...row.body.split("\n").map(line => plain(line, LEAD_SAY_MAX)).filter(line => line !== "")].join("\n"));
+/** The words a chat shows for a lead-say row: the lead's name, then each line, plain, with no task id. `reader`: whose
+ * chat it is, for a row with no recipient (see leadSubjectOf). */
+export function leadSayText(store: Store, row: Pick<Notification, "kind" | "subject" | "body" | "recipient">, reader?: string | null): string {
+  return chatText([plain(leadSubjectOf(store, row, reader), 60), "", ...row.body.split("\n").map(line => plain(line, LEAD_SAY_MAX)).filter(line => line !== "")].join("\n"));
 }
 
 /** The earlier rows of a lead-say message (newest first): a chat that showed one edits it rather than sending again. */

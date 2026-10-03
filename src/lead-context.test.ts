@@ -135,6 +135,12 @@ describe("the lead's bundle", () => {
     expect(firstSentenceOf("Small payment providers, e.g. Stripe or Adyen, keep card data off our servers. We looked at more.")).toBe("Small payment providers, e.g. Stripe or Adyen, keep card data off our servers.");
     expect(firstSentenceOf("Faster builds, i.e. under 5 minutes. Also cheaper.")).toBe("Faster builds, i.e. under 5 minutes.");
     expect(firstSentenceOf("One line\nsecond line")).toBe("One line");
+    // Abbreviations in any case; "No." ends a sentence unless a number follows it.
+    expect(firstSentenceOf("Card data stays off our servers, E.g. Stripe holds it. We looked at more.")).toBe("Card data stays off our servers, E.g. Stripe holds it.");
+    expect(firstSentenceOf("Faster builds, I.E. Under 5 minutes. Also cheaper.")).toBe("Faster builds, I.E. Under 5 minutes.");
+    expect(firstSentenceOf("No. The old page confuses people.")).toBe("No.");
+    expect(firstSentenceOf("We said no. It confuses people.")).toBe("We said no.");
+    expect(firstSentenceOf("Ticket No. 5 settled it. Also cheaper.")).toBe("Ticket No. 5 settled it.");
     decide(API, "Use Postgres", "Mature tooling, e.g. Postgres has pg_dump. Also familiar.", T0);
     expect(bundle().projects[1].decisions[0].why).toBe("Mature tooling, e.g. Postgres has pg_dump.");
   });

@@ -53,6 +53,14 @@ describe("enrollment", () => {
     expect(store.seedPushPairs(later(1_000))).toBe(1);
   });
 
+  test("a met promise is said on the chat it was made on: a phone's push pair for it is settled, never sent", () => {
+    enroll();
+    store.enqueueNotification({ dedupeKey: "lead-promise:slack:1", kind: "lead-say", subject: "Lead", body: "It is time.", pushClass: "attention", recipient: "alex" }, later(1_000));
+    expect(store.seedPushPairs(later(1_000))).toBe(1);
+    expect(store.handle.prepare("SELECT state, last_error FROM push_delivery").all()).toEqual([{ state: "retired", last_error: "skipped:for-another-chat" }]);
+    expect(store.claimPushPairs("o", 60_000, 10, later(2_000))).toEqual([]);
+  });
+
   test("identical live enrollment is idempotent; a conflicting binding is replaced", () => {
     const first = enroll();
     if (!first.ok) throw new Error("enroll");

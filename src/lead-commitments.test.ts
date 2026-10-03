@@ -16,6 +16,14 @@ import { getCommitment, openCommitments, promiseChannelOf } from "./lead-commitm
 import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
 import { prepareSharedAction } from "./chat-actions.js";
 import { TELEGRAM_SKIPPED_OTHER_CHAT } from "./store.js";
+import { SlackState, slackHash } from "./slack-state.js";
+import { deliverSlackPart, planSlackNotifications, type SlackChatOptions } from "./slack-chat.js";
+import type { SlackApi } from "./slack-api.js";
+import { ChatState, chatHash } from "./chat-delivery-state.js";
+import { deliverDiscordPart, planDiscordNotifications, type DiscordChatOptions } from "./discord-chat.js";
+import type { DiscordApi } from "./discord-api.js";
+import { deliverTeamsPart, planTeamsNotifications, type TeamsChatOptions } from "./teams-chat.js";
+import type { TeamsApi } from "./teams-api.js";
 
 describe("the lead keeps its promises and remembers corrections", () => {
   let root: string, repo: string, store: Store, who: VerifiedApprover, session: number, thread: number;
@@ -215,6 +223,73 @@ describe("the lead keeps its promises and remembers corrections", () => {
     // Reported once: a later pass sends nothing more.
     await pass(at(40));
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM notification WHERE dedupe_key LIKE 'lead-promise:%'").get()).toMatchObject({ n: 2 });
+  });
+
+  test.each(["slack", "discord", "teams"] as const)("c1: a promise made on %s is delivered there as the lead's message, and one made on another chat is not", async channel => {
+    const sent: string[] = [];
+    let next = 100;
+    const installation = `installation-${channel}`;
+    const base = { store, owner: "test", readProjects: async () => [repo], evidenceRoot: root, current: () => true, origin: () => "https://console.example", clock: () => at(32) };
+    let plan: () => Promise<void>, deliver: () => Promise<boolean>;
+    if (channel === "slack") {
+      const identity = { installation, team: "TTEST", app: "ATEST", bot: "UBOT", workspace: "Test workspace" };
+      const api: SlackApi = async (method, args = {}) => {
+        if (method === "users.info") return { user: { id: "UTEST", team_id: "TTEST", deleted: false, is_bot: false } };
+        if (method === "conversations.info") return { channel: { id: "DTEST", is_im: true, user: "UTEST" } };
+        if (method === "chat.postMessage" || method === "chat.update") { sent.push(String(args["text"])); return { ts: `1789700000.${String(next++).padStart(6, "0")}` }; }
+        return {};
+      };
+      const state = new SlackState(store), options: SlackChatOptions = { ...base, identity, api };
+      state.lease(installation, "test", at(32));
+      expect(state.pair(identity, slackHash(state.pairing(installation, "operator", store.accountOf("operator")!.generation, t0)), "UTEST", "DTEST", t0)).not.toBeNull();
+      plan = () => planSlackNotifications(options); deliver = () => deliverSlackPart(options);
+    } else if (channel === "discord") {
+      const identity = { installation, app: "200000000000000001", bot: "100000000000000001", workspace: "Discord" };
+      const api: DiscordApi = async (method, path, body = {}) => {
+        if (path === "/users/300000000000000001") return { id: "300000000000000001" };
+        if (path === "/channels/400000000000000001") return { id: "400000000000000001", type: 1, recipients: [{ id: "300000000000000001" }] };
+        if (method === "GET") return { items: [] };
+        sent.push(JSON.stringify(body));
+        return { id: String(500000000000000000n + BigInt(next++)), channel_id: "400000000000000001", author: { id: identity.bot } };
+      };
+      const state = new ChatState(store, "discord"), options: DiscordChatOptions = { ...base, identity, api };
+      state.lease(installation, "test", at(32));
+      expect(state.pair(identity, chatHash(state.pairing(installation, "operator", store.accountOf("operator")!.generation, t0)), "300000000000000001", "400000000000000001", t0)).not.toBeNull();
+      plan = () => planDiscordNotifications(options); deliver = () => deliverDiscordPart(options);
+    } else {
+      const identity = { installation, team: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", app: "11111111-2222-4333-8444-555555555555", bot: "28:11111111-2222-4333-8444-555555555555", workspace: "Teams" };
+      const api: TeamsApi = async (method, _service, path, body) => {
+        if (method === "GET") return { id: decodeURIComponent(path.split("/members/")[1] ?? "") };
+        sent.push(String(body?.["text"] ?? JSON.stringify(body)));
+        return { id: `act-${next++}` };
+      };
+      const state = new ChatState(store, "teams"), options = { ...base, identity, api } as TeamsChatOptions;
+      state.lease(installation, "test", at(32));
+      state.setMeta(installation, "serviceUrl:a:1dm-operator-conversation", "https://smba.trafficmanager.net/teams/", t0);
+      expect(state.pair(identity, chatHash(state.pairing(installation, "operator", store.accountOf("operator")!.generation, t0)), "29:1operator-user-id-xxxxxxxxx", "a:1dm-operator-conversation", t0)).not.toBeNull();
+      plan = () => planTeamsNotifications(options); deliver = () => deliverTeamsPart(options);
+    }
+    const other = channel === "slack" ? "discord" : "slack";
+    turn(at(1), ctx => { call(ctx, "commit_to", { what: "I'll ping you at noon", when: "time", at: at(30).toISOString() }); }, "answered", channel);
+    turn(at(2), ctx => { call(ctx, "commit_to", { what: "Remind you about the docs", when: "time", at: at(30).toISOString() }); }, "answered", other);
+    await pass(at(31));
+    for (let round = 0; round < 2; round++) {
+      await plan();
+      for (let i = 0; i < 20 && (await deliver()); i++);
+    }
+    expect(sent.filter(text => text.includes("I said I would"))).toEqual([expect.stringContaining("It is time. (I said I would ping you at noon.)")]);
+  });
+
+  test("c1: an interrupted reply whose text was shown keeps its promises; one that showed nothing drops them", async () => {
+    const shown = turn(t0, ctx => { call(ctx, "commit_to", { what: "Tell you at one", when: "time", at: at(60).toISOString() }); }, "failed");
+    store.appendMateMessage({ thread, turn: shown, role: "assistant", text: "I'll tell you at one." }, t0);
+    turn(at(1), ctx => { call(ctx, "commit_to", { what: "Tell you at two", when: "time", at: at(120).toISOString() }); }, "failed");
+    expect(openCommitments(store, "operator")).toMatchObject([{ what: "Tell you at one" }]);
+    await pass(at(2));
+    expect(store.handle.prepare("SELECT what, state FROM lead_commitment ORDER BY id").all()).toEqual([
+      { what: "Tell you at one", state: "open" }, { what: "Tell you at two", state: "cancelled" }]);
+    await pass(at(61));
+    expect(said()).toEqual(["It is time. (I said I would tell you at one.)"]);
   });
 
   test("c1: a promise from a reply still being written is not listed until that reply is answered", async () => {
