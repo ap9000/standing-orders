@@ -1915,7 +1915,7 @@ await journey("onboarding", "The first task's timeline fills in as it moves, and
   await on.goto(`${install.base}/t/${encodeURIComponent(install.task.id)}#approve`);
   const approve = on.locator("form.approve-form").first();
   await waitFor(approve, "the approval form");
-  await on.evaluate(() => { for (const one of document.querySelectorAll("details")) one.open = true; });
+  await on.evaluate(() => { for (const one of document.querySelectorAll("details:not(.approval-edit)")) one.open = true; });
   await approve.locator('input[name="token"]').fill(password);
   await Promise.all([on.waitForNavigation(), approve.locator('button[type="submit"]').first().click()]);
   const said = (await on.locator(".problem, [role=alert]").allInnerTexts().catch(() => [])).join(" | ");
