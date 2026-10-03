@@ -4634,7 +4634,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     const messages = store.listMateMessages(opened.thread.id, 40);
     // The lead's question with buttons, while its reply is the last word in the thread.
     const last = messages.at(-1);
-    const ask = last?.role === "assistant" && last.turn !== null && store.getMateTurn(last.turn)?.approver === who.name ? store.mateAskOpen(last.turn) : null;
+    const ask = last?.role === "assistant" && last.turn !== null && store.getMateTurn(last.turn)?.approver === who.name ? store.mateAskOpen(last.turn, now) : null;
     // Answered questions stay readable above the answer; only their buttons go.
     const asks = new Map(messages.flatMap(one => { const asked = one.role === "assistant" && one.turn !== null ? store.mateAsk(one.turn) : null; return asked === null ? [] : [[asked.turn, asked] as const]; }));
     return {

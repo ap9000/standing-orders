@@ -5,18 +5,28 @@
  * one for "Something else", minted when the part is planned (chat_ask_action).
  * A tapped option is sent as the owner's next message in their own chat with
  * Toolroll, so the lead reads it like anything they typed; "Something else"
- * asks them to type it. A button works once, only for the person the lead
+ * asks them to type it. Buttons are drawn only in that own chat (any thread of
+ * it): in a room the question goes out as text, since a tap there is not the
+ * owner's own message. A button works once, only for the person the lead
  * asked, and only while nobody has written in that thread since.
  */
 import type { ChatBinding, ChatContent, ChatEvent, ChatState } from "./chat-delivery-state.js";
 import { chatHash } from "./chat-delivery-state.js";
-import { MATE_ASK_OTHER, type Store } from "./store.js";
+import { MATE_ASK_OTHER, type MateAsk, type Store } from "./store.js";
 
-/** The live buttons on one part, in the order they were minted: the options, then "Something else". */
+/** The question as text with its options, where no buttons are drawn. */
+export function chatAskText(ask: Pick<MateAsk, "question" | "options">): string {
+  return [ask.question, ...ask.options.map(one => `• ${one}`), `• ${MATE_ASK_OTHER}: say it in your own words`].join("\n");
+}
+
+/** The live buttons on one part, in the order they were minted: the options, then "Something else". None when the part
+ * is not in its owner's own chat with Toolroll (a room), where a tap could not be their message. */
 export function chatAskButtons(state: ChatState, part: number, now: Date): Array<{ token: string; label: string; words: boolean }> {
-  const row = state.prepare("SELECT payload FROM chat_part WHERE id=?").get(part);
-  const content = row === undefined ? null : JSON.parse(String(row["payload"])) as ChatContent;
-  const options = content?.ask?.options ?? [];
+  const row = state.prepare("SELECT p.payload,e.channel,b.channel AS own FROM chat_part p JOIN chat_event e ON e.id=p.event JOIN chat_binding b ON b.id=e.binding WHERE p.id=?").get(part);
+  if (row === undefined) return [];
+  const content = JSON.parse(String(row["payload"])) as ChatContent;
+  if ((content.channel ?? row["channel"]) !== row["own"]) return [];
+  const options = content.ask?.options ?? [];
   return (state.prepare("SELECT token,choice FROM chat_ask_action WHERE part=? AND consumed IS NULL AND expires>? ORDER BY rowid").all(part, now.toISOString()) as Array<{ token: string; choice: number | null }>)
     .map(one => {
       const label = one.choice === null ? MATE_ASK_OTHER : options[Number(one.choice)] ?? null;
@@ -45,13 +55,19 @@ export function applyChatAskTap(options: { store: Store; state: ChatState }, eve
     return true;
   }
   const turn = Number(action["turn"]), part = Number(action["part"]);
-  const ask = store.getMateTurn(turn)?.approver === binding.approver ? store.mateAskOpen(turn) : null;
-  if (action["consumed"] !== null || String(action["expires"]) <= now.toISOString() || ask === null) {
+  const found = store.getMateTurn(turn)?.approver === binding.approver ? store.mateAskState(turn, now) : { state: "expired" as const };
+  const expired = found.state === "expired" || String(action["expires"]) <= now.toISOString();
+  if (action["consumed"] !== null || found.state !== "open" || expired) {
     state.prepare("UPDATE chat_ask_action SET consumed=? WHERE part=? AND consumed IS NULL").run(now.toISOString(), part);
-    repaint(state, part, event, "This question was already answered.");
-    state.finish(event.id);
+    if (found.state === "answered" || (action["consumed"] !== null && !expired)) {
+      repaint(state, part, event, "This question was already answered.");
+      state.finish(event.id);
+    }
+    // A question this old can no longer be edited in place: the answer to the tap is a new message.
+    else say("This question expired. If it still matters, send your answer as a message.");
     return true;
   }
+  const ask = found.ask;
   if (action["choice"] === null) {
     say("Type your answer here as your next message.");
     return true;

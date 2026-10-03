@@ -1740,7 +1740,8 @@ function hasRecordedDecisions(store: Store, repo: string): boolean {
 /**
  * A proposal on a project with recorded decisions needs search_project_memory over that project (or every project) in an
  * EARLIER step of this turn, as propose_review needs get_result first: a recommendation is checked against what the
- * project already settled. When the arguments name no project, any admitted project with decisions counts.
+ * project already settled. When the arguments name no project, it could be about any of them: each admitted project
+ * with decisions needs a search (one over every project covers them all).
  */
 function memoryUnsearched(ctx: MateToolContext, name: string, args: Record<string, unknown>): MateToolResult | null {
   if (!name.startsWith("propose_")) return null;
@@ -1748,8 +1749,10 @@ function memoryUnsearched(ctx: MateToolContext, name: string, args: Record<strin
   const settled = (named === null ? ctx.who.repos : [named]).filter(repo => hasRecordedDecisions(ctx.store, repo));
   if (settled.length === 0) return null;
   const searchedAt = (key: string): boolean => { const step = ctx.searchedMemory?.get(key); return step !== undefined && step < ctx.step; };
-  if (searchedAt("*") || settled.some(searchedAt)) return null;
-  return { ok: false, message: "This project has recorded decisions. Search them with search_project_memory first, then propose in a later step, citing any decision you rely on." };
+  if (searchedAt("*") || settled.every(searchedAt)) return null;
+  return { ok: false, message: named === null
+    ? "Your projects have recorded decisions. Search them with search_project_memory first (leave out the project to search them all), then propose in a later step, citing any decision you rely on."
+    : "This project has recorded decisions. Search them with search_project_memory first, then propose in a later step, citing any decision you rely on." };
 }
 
 export const MATE_TOOL_SCHEMAS: MateToolSchema[] = MATE_TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));

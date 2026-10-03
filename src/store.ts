@@ -289,7 +289,7 @@ export type TaskActRow = { act: TaskAct; account: string; lead: boolean; person:
  * a question is open while no later message from the owner sits in its thread. */
 export const MATE_ASK_SCHEMA = `
 CREATE TABLE IF NOT EXISTS mate_ask (
-  turn         INTEGER PRIMARY KEY REFERENCES mate_turn(id),
+  turn         INTEGER PRIMARY KEY REFERENCES mate_turn(id) ON DELETE CASCADE,
   thread       INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
   question     TEXT NOT NULL,
   options_json TEXT NOT NULL,
@@ -299,6 +299,8 @@ CREATE INDEX IF NOT EXISTS mate_ask_thread ON mate_ask (thread, turn);
 `;
 export type MateAsk = { turn: number; thread: number; question: string; options: string[]; createdAt: string };
 export const MATE_ASK_OTHER = "Something else";
+/** How long the question's buttons work, on every channel. */
+export const MATE_ASK_TTL_MS = 7 * 86_400_000;
 
 /** Settings → Integrations (no version bump): each integration's last check. `outcome` is ok, failed, or absent (the check found
  * nothing set up, such as no `gh` sign-in). `ok_at` and `error`/`error_at` keep the last success and the last
@@ -23725,13 +23727,23 @@ export class Store {
     return { turn: Number(row["turn"]), thread: Number(row["thread"]), question: String(row["question"]), options: Array.isArray(options) ? options.map(String) : [], createdAt: String(row["created_at"]) };
   }
 
-  /** Open: answered, and nobody has written in its thread since the reply that asked it. */
-  mateAskOpen(turn: number): MateAsk | null {
+  /** What a tap on the question finds: open; answered (the owner has written in its thread since the reply that asked it);
+   * or expired (older than MATE_ASK_TTL_MS, or the question or the reply that asked it is gone, as after a retention purge). */
+  mateAskState(turn: number, now: Date): { state: "open"; ask: MateAsk } | { state: "answered" | "expired" } {
     const ask = this.mateAsk(turn);
-    if (ask === null) return null;
-    const later = this.db.prepare(`SELECT 1 AS hit FROM mate_message WHERE thread = ? AND role = 'operator'
-      AND id > COALESCE((SELECT MAX(id) FROM mate_message WHERE thread = ? AND turn = ? AND role = 'assistant'), 9223372036854775807) LIMIT 1`).get(ask.thread, ask.thread, turn);
-    return later === undefined ? ask : null;
+    if (ask === null) return { state: "expired" };
+    const asking = this.db.prepare("SELECT MAX(id) AS id FROM mate_message WHERE thread = ? AND turn = ? AND role = 'assistant'").get(ask.thread, turn);
+    if (asking === undefined || asking["id"] === null) return { state: "expired" };
+    const later = this.db.prepare("SELECT 1 AS hit FROM mate_message WHERE thread = ? AND role = 'operator' AND id > ? LIMIT 1").get(ask.thread, Number(asking["id"]));
+    if (later !== undefined) return { state: "answered" };
+    if (new Date(ask.createdAt).getTime() + MATE_ASK_TTL_MS <= now.getTime()) return { state: "expired" };
+    return { state: "open", ask };
+  }
+
+  /** The question while it is open (see mateAskState); null otherwise. */
+  mateAskOpen(turn: number, now: Date): MateAsk | null {
+    const found = this.mateAskState(turn, now);
+    return found.state === "open" ? found.ask : null;
   }
 
   // ---- the screenshots a turn selected (v64) ------------------------------------

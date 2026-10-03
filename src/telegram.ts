@@ -2047,8 +2047,14 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
   if (askTap !== null) {
     if (tapChat !== binding.chatId || context.conversation === undefined) { report.ignored++; return; }
     const turn = Number(askTap[1]);
-    const ask = store.getMateTurn(turn)?.approver === binding.approver ? store.mateAskOpen(turn) : null;
-    if (ask === null) { ack("That question was already answered."); if (message.text) editText(message.text); return; }
+    const found = store.getMateTurn(turn)?.approver === binding.approver ? store.mateAskState(turn, clock()) : { state: "expired" as const };
+    if (found.state !== "open") {
+      const line = found.state === "answered" ? "That question was already answered." : "That question expired. Send your answer as a message.";
+      ack(line);
+      editText(`${message.text ?? ""}\n\n${line}`.trim().slice(0, 4000));
+      return;
+    }
+    const ask = found.ask;
     if (store.telegramConversationWaitingOn(binding.id, String(message.message_id))) { ack("Your answer is on its way."); return; }
     if (askTap[2] === "x") { ack("Type your answer as a message."); return; }
     const option = ask.options[Number(askTap[2])];

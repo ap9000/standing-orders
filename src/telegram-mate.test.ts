@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openStore, type Store, type TelegramBinding } from "./store.js";
+import { MATE_ASK_TTL_MS, openStore, type Store, type TelegramBinding } from "./store.js";
 import { addApprover, approve, propose } from "./scope.js";
 import { bridgePass, createTransport, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport, type TelegramUpload } from "./telegram.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
@@ -276,6 +276,21 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     await tapPass(rows[0]![0]!.callback_data, asked.messageId!);
     expect(script.acks().at(-1)).toBe("That question was already answered.");
     expect(requests).toHaveLength(3);
+  });
+  test("a tap on the lead's question after its time says it expired and sends nothing (ask_owner)", async () => {
+    answers.push(
+      { text: "", calls: [{ id: "q1", name: "ask_owner", args: { question: "Ship today or Friday?", options: ["Today", "Friday"] } }] },
+      { text: "It depends on one thing." },
+    );
+    script.updates.push([textUpdate(2, "When should the release go out?")]);
+    await pass();
+    const asked = script.sends().find(call => String(call.params["text"]) === "Ship today or Friday?")!;
+    const rows = (asked.params["reply_markup"] as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard;
+    now = new Date(now.getTime() + MATE_ASK_TTL_MS);
+    await tapPass(rows[0]![0]!.callback_data, asked.messageId!);
+    expect(script.acks().at(-1)).toBe("That question expired. Send your answer as a message.");
+    expect(script.edits().at(-1)).toContain("That question expired.");
+    expect(requests).toHaveLength(2);
   });
   test("a hidden path uses complete review instead of offering incomplete confirmation",()=>{
     const preview=proposalPreview(store,{kind:'action',payload:{operation:'knowledge_instructions',request:{},repo,title:'Save project instructions',terms:['Use /Users/operator/project/reference.md'],stamp:'fixture',state:{}}} as Parameters<typeof proposalPreview>[1],[repo]);

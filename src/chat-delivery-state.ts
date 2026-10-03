@@ -1,6 +1,6 @@
 /** Durable private-chat receipts. Each transport has its own tables and lease. */
 import { createHash, randomBytes } from "node:crypto";
-import type { Store } from "./store.js";
+import { MATE_ASK_TTL_MS, type Store } from "./store.js";
 
 const CHAT_SCHEMA = `
 CREATE TABLE IF NOT EXISTS chat_binding (
@@ -99,7 +99,7 @@ CREATE INDEX IF NOT EXISTS chat_question_prompt_open ON chat_question_prompt(bin
  * "Something else" (choice NULL). A tap sends the option as the owner's next message. Never in CHAT_TABLES. */
 const CHAT_ASK_SCHEMA = `
 CREATE TABLE IF NOT EXISTS chat_ask_action (
- token TEXT PRIMARY KEY, part INTEGER NOT NULL REFERENCES chat_part(id),
+ token TEXT PRIMARY KEY, part INTEGER NOT NULL REFERENCES chat_part(id) ON DELETE CASCADE,
  turn INTEGER NOT NULL, choice INTEGER, expires TEXT NOT NULL, consumed TEXT
 );
 CREATE INDEX IF NOT EXISTS chat_ask_action_turn ON chat_ask_action(turn);
@@ -463,7 +463,7 @@ export class ChatState {
           for (const choice of [...part.ask.options.map((_, index) => index), null])
             this.prepare("INSERT INTO chat_ask_action(token,part,turn,choice,expires) VALUES(?,?,?,?,?)").run(
               randomBytes(16).toString("hex"), Number(inserted.lastInsertRowid), part.ask.turn, choice,
-              new Date(now.getTime() + 7 * 86_400_000).toISOString());
+              new Date(now.getTime() + MATE_ASK_TTL_MS).toISOString());
         if (Number(inserted.changes) && part.flow)
           for (const action of part.flow.actions)
             this.prepare("INSERT INTO chat_flow_action(token,part,card,entry,action,expires) VALUES(?,?,?,?,?,?)").run(

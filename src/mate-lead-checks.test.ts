@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { openStore, type Store } from "./store.js";
+import { MATE_ASK_TTL_MS, openStore, type Store } from "./store.js";
+import { sweepRetention } from "./retention.js";
 import { fileTaskProposal } from "./proposal.js";
 import { verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { executeMateTool, type MateToolContext } from "./mate-tools.js";
@@ -69,6 +70,25 @@ describe("the lead checks before it speaks", () => {
     expect(executeMateTool(ctx(4, { searchedMemory: searched }), "propose_task", { repo: "r1", ...TASK_ARGS })).toMatchObject({ ok: true });
   });
 
+  test("c1: a proposal that names no project it can be traced to needs a search of each project with decisions", () => {
+    recordDecision(store, { repo: OPEN, actor: "alex", draft: { claim: "Keep the signup form short", why: "Fewer drop-offs." } }, T0);
+    const searched = new Map<string, number>();
+    const unnamed = (step: number) => executeMateTool(ctx(step, { searchedMemory: searched }), "propose_steer", { task: "no-such-task", note: "Start with the form." });
+    expect(unnamed(1)).toMatchObject({ ok: false, message: expect.stringContaining("Your projects have recorded decisions") });
+    // One project searched is not enough: the proposal could be about the other.
+    executeMateTool(ctx(1, { searchedMemory: searched }), "search_project_memory", { query: "refunds", repo: "r1" });
+    expect(unnamed(2)).toMatchObject({ ok: false, message: expect.stringContaining("search_project_memory") });
+    executeMateTool(ctx(2, { searchedMemory: searched }), "search_project_memory", { query: "signup", repo: "r2" });
+    // Both searched: the memory check passes and the tool answers for itself.
+    const passed = unnamed(3);
+    expect(passed.ok === false && passed.message).not.toContain("search_project_memory");
+    // A search over every project covers them all.
+    const everywhere = new Map<string, number>();
+    executeMateTool(ctx(1, { searchedMemory: everywhere }), "search_project_memory", { query: "plans" });
+    const covered = executeMateTool(ctx(2, { searchedMemory: everywhere }), "propose_steer", { task: "no-such-task", note: "Start with the form." });
+    expect(covered.ok === false && covered.message).not.toContain("search_project_memory");
+  });
+
   test("c2: the lead reads integration status, and Settings → Integrations is a fixed control", () => {
     const list: Integration[] = [
       { key: "telegram", group: "chat", name: "Telegram", state: "connected", account: "@toolroll_bot", detail: null, checked: true, checkedAt: null, lastSuccessAt: "2026-10-02T11:00:00.000Z", lastError: null, lastErrorAt: null, usedBy: ["Chat"], action: { kind: "test", label: "Send test" } },
@@ -123,12 +143,47 @@ describe("the lead checks before it speaks", () => {
       return opened.id;
     };
     const first = turn(true);
-    expect(store.mateAskOpen(first)).toMatchObject({ question: "Which first?", options: ["Login", "Signup"] });
+    expect(store.mateAskOpen(first, T0)).toMatchObject({ question: "Which first?", options: ["Login", "Signup"] });
     store.appendMateMessage({ thread: thread.id, turn: null, role: "operator", text: "Login" }, T0);
-    expect(store.mateAskOpen(first)).toBeNull();
+    expect(store.mateAskOpen(first, T0)).toBeNull();
+    expect(store.mateAskState(first, T0).state).toBe("answered");
     expect(store.mateAsk(first)).not.toBeNull();
     const failed = turn(false);
     expect(store.mateAsk(failed)).toBeNull();
+  });
+
+  test("c2: a question is open, then answered or expired; its rows never block a purge of the turn or the reply", () => {
+    const thread = store.openMateThread("alex", who.ceilingDigest, T0).thread;
+    store.mintMateSession({ approver: "alex", approverGeneration: who.generation, credentialKey: "k", ceilingMicrousd: 5_000_000, ceilingDigest: who.ceilingDigest, termsDigest: "t".repeat(64) }, T0);
+    const session = store.activeMateSession("alex")!;
+    const asked = (at: Date): number => {
+      const opened = store.openMateTurn({ approver: "alex", session: session.id, thread: thread.id, credentialKey: "k", reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, at);
+      if (!opened.ok) throw new Error(opened.reason);
+      const started = store.startMateTurn(opened.id, at);
+      if (!started.ok) throw new Error("start");
+      store.appendMateMessage({ thread: thread.id, turn: opened.id, role: "operator", text: "Plan the refunds" }, at);
+      store.recordMateAsk({ turn: opened.id, thread: thread.id, question: "Which first?", options: ["Login", "Signup"] }, at);
+      store.finalizeMateTurn(opened.id, started.generation, { state: "answered", settledMicrousd: 1, tokensIn: 1, tokensOut: 1, message: { text: "One choice first.", activity: "" } }, at);
+      return opened.id;
+    };
+    // Too old: expired, not answered.
+    const old = asked(T0);
+    expect(store.mateAskState(old, T0).state).toBe("open");
+    expect(store.mateAskState(old, new Date(T0.getTime() + MATE_ASK_TTL_MS)).state).toBe("expired");
+    expect(store.mateAskOpen(old, new Date(T0.getTime() + MATE_ASK_TTL_MS))).toBeNull();
+    // A retention purge of the chat takes the question with the reply that asked it; a tap then finds it expired.
+    store.setRetentionPeriod("chat", 30, "alex", T0);
+    const later = new Date(T0.getTime() + 40 * 86_400_000);
+    const recent = asked(later);
+    const swept = sweepRetention(store, join(dir, "evidence"), later);
+    expect(swept.counts.find(one => one.kind === "chat")?.count).toBe(2);
+    expect(store.handle.prepare("SELECT turn FROM mate_ask ORDER BY turn").all().map(row => Number(row["turn"]))).toEqual([recent]);
+    expect(store.mateAskState(old, later).state).toBe("expired");
+    expect(store.mateAskState(recent, later).state).toBe("open");
+    // Deleting the turn itself is never blocked by its question.
+    store.handle.prepare("DELETE FROM mate_message WHERE turn = ?").run(recent);
+    store.handle.prepare("DELETE FROM mate_turn WHERE id = ?").run(recent);
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_ask").get()!["n"]).toBe(0);
   });
 
   test("c3: the contract carries the reply rules, the memory, integration and asking rules", () => {

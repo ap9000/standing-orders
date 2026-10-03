@@ -1,6 +1,6 @@
 /** Shared saved replies, explicit confirmations and progress for private chat transports. */
 import { answerChatQuestionPrompt, applyChatQuestionTap, questionParts } from "./teammate-question.js";
-import { applyChatAskTap } from "./chat-ask.js";
+import { applyChatAskTap, chatAskText } from "./chat-ask.js";
 import {
   channelRepos,
   resolveChannelMate,
@@ -474,10 +474,11 @@ export async function processChatEvent(
     const parts: ChatContent[] = splitChatText(reply, options.partSize).map(
       (text) => (about === null ? { text } : { text, task: about.task, ...(about.run === null ? {} : { run: about.run }) }),
     );
-    // The lead's question to its owner: its options as buttons, then "Something else".
+    // The lead's question to its owner: its options as buttons, then "Something else", in their own chat (any thread);
+    // in a room a tap is not their message, so the question and its options go out as text.
     const ask = store.mateAsk(turn.id);
     if (ask !== null)
-      parts.push({ text: phoneText(ask.question, 1000), ask: { turn: ask.turn, options: ask.options },
+      parts.push({ ...(event.channel === binding.channel ? { text: phoneText(ask.question, 1000), ask: { turn: ask.turn, options: ask.options } } : { text: phoneText(chatAskText(ask), 1000) }),
         ...(about === null ? {} : { task: about.task, ...(about.run === null ? {} : { run: about.run }) }) });
     for (const image of store.listMateTurnEvidence(turn.id))
       parts.push({
