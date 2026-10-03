@@ -198,8 +198,8 @@ describe("the lead checks before it speaks", () => {
       "say 'I don't know', then check with a tool",
       "never make up an answer, and never present a guess as something you remember",
       "call search_project_memory for it this turn",
-      "read get_integrations",
-      "show_control integrations",
+      "call get_capabilities this turn",
+      "open its link with show_control",
       "use ask_owner: one question, 2-4 short options",
       "only when the answer changes the work",
     ]) expect(MATE_CONTRACT).toContain(rule);

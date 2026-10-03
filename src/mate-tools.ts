@@ -16,6 +16,7 @@ import { conversationKnowledge, knowledgeView } from "./project-knowledge.js";
 import { cancelCommitment, CHECK_RESULTS, type CommitmentChannel, conditionWords, latestResultRun, recordCommitment, RUN_OUTCOMES, TASK_STATES, type CommitmentCondition, type TaskState } from "./lead-commitments.js";
 import { searchMemory } from "./project-memory.js";
 import { integrationsNow, STATE_WORDS, type Integration } from "./integrations.js";
+import { CAPABILITIES_UNREAD, capabilitiesOf, needsCapabilities } from "./lead-capabilities.js";
 import { readChatResult, reviewInputProblem, type ReviewSnapshot } from "./chat-review.js";
 import { RESULT_IMAGES_PER_TURN_CAP, selectResultImages, type ResultImagePick } from "./chat-evidence.js";
 import { CHAT_CONTROLS, isChatControl } from "./chat-controls.js";
@@ -82,6 +83,10 @@ export type MateToolContext = {
   searchedMemory?: Map<string, number>;
   /** The integrations as Settings → Integrations shows them; absent: read from the files beside the database. */
   integrations?: () => readonly Integration[];
+  /** Where get_capabilities read this turn (a project path, or "*" for every project) and at which step. A proposal or
+   * promise whose work needs an agent, a worker or an integration needs a read covering it in an EARLIER step. The
+   * conversation loop always passes it; absent (a direct call outside a turn), nothing is checked. */
+  checkedCapabilities?: Map<string, number>;
   /** Records this turn's one question to its owner; false when it already asked one. Absent: this surface cannot ask. */
   ask?: (question: string, options: readonly string[]) => boolean;
 };
@@ -1286,6 +1291,26 @@ export const MATE_TOOLS: MateTool[] = [
     },
   },
   {
+    name: "get_capabilities",
+    description: "Read in one call what you can rely on now: agents (each provider and model the project's tasks would use: Signed in, Signed out, Out of plan budget, with the sign-in command), workers (online or offline, capacity and what is running), the project's tools and skills (Working, Needs X, Last test failed), integrations (as get_integrations) and checks (the project's check level and whether a release check is set). Each entry says what it lets you do and, when it can't, next (the one next step) and link (the show_control that opens its settings). Leave out repo to read every project. Read-only; probes nothing and spends nothing. Read it before promising or proposing work that depends on any of these, and before telling the owner something can't be done.",
+    inputSchema: schema({ repo: REPO_ARG }),
+    handle: (ctx, args) => {
+      const repo = args["repo"] === undefined ? null : repoPathOf(ctx.who, args["repo"]);
+      if (args["repo"] !== undefined && repo === null) return { ok: false, message: "Choose a project from list_repos." };
+      const repos = repo === null ? ctx.who.repos.slice(0, 8) : [repo];
+      const found = capabilitiesOf(ctx.store, { repos, admitted: ctx.who.repos, actor: ctx.who.name, integrations: ctx.integrations?.() ?? integrationsNow(integrationIoOf(ctx)), now: ctx.now });
+      const key = repo ?? "*";
+      if (!ctx.checkedCapabilities?.has(key)) ctx.checkedCapabilities?.set(key, ctx.step);
+      return { ok: true, body: {
+        projects: found.projects.map(({ repo: path, ...rest }) => ({ repo: `r${ctx.who.repos.indexOf(path) + 1}`, ...rest })),
+        workers: found.workers,
+        integrations: found.integrations,
+        ...(repo === null && ctx.who.repos.length > repos.length ? { notice: `Only the first ${repos.length} projects are shown; name a project for another.` } : {}),
+        rule: "Promise only what an entry says works. When one can't, say so plainly with its next step and open its link with show_control; never pretend. Before saying something can't be done, read the relevant skill (get_skills) too.",
+      } };
+    },
+  },
+  {
     name: "ask_owner",
     description: `Ask the owner one question as tappable buttons: 2-4 short options; "${MATE_ASK_OTHER}" is added. The tapped option comes back as their next message. Only when the answer changes the work; at most once per reply. Then finish with a short reply that leads into it; the question and buttons follow it.`,
     inputSchema: schema({
@@ -1874,6 +1899,20 @@ function memoryUnsearched(ctx: MateToolContext, name: string, args: Record<strin
     : "This project has recorded decisions. Search them with search_project_memory first, then propose in a later step, citing any decision you rely on." };
 }
 
+/**
+ * A proposal or promise whose work needs an agent, a worker or an integration (needsCapabilities) needs get_capabilities
+ * read over its project (or every project) in an EARLIER step of this turn, as a proposal needs its memory search: the
+ * lead never promises what it has not checked can run. One that names no project is covered by any read this turn.
+ */
+function capabilitiesUnread(ctx: MateToolContext, name: string, args: Record<string, unknown>): MateToolResult | null {
+  const read = ctx.checkedCapabilities;
+  if (read === undefined || !needsCapabilities(name, args, ctx.channel)) return null;
+  const before = (key: string): boolean => { const step = read.get(key); return step !== undefined && step < ctx.step; };
+  const named = proposalRepoOf(ctx, args);
+  if (named === null ? [...read.values()].some(step => step < ctx.step) : before(named) || before("*")) return null;
+  return { ok: false, message: CAPABILITIES_UNREAD };
+}
+
 export const MATE_TOOL_SCHEMAS: MateToolSchema[] = MATE_TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
 
 export function isMateTool(name: string): boolean {
@@ -1888,8 +1927,8 @@ export function executeMateTool(ctx: MateToolContext, name: string, args: Record
   if (tool === undefined) return { ok: false, message: `no tool named ${redactForMate(name, scrub)}` };
   let result: MateToolResult;
   try {
-    const unsearched = memoryUnsearched(ctx, name, args);
-    result = unsearched ?? tool.handle(ctx, args);
+    const unchecked = memoryUnsearched(ctx, name, args) ?? capabilitiesUnread(ctx, name, args);
+    result = unchecked ?? tool.handle(ctx, args);
   } catch {
     result = { ok: false, message: "that tool refused — the plane could not answer it right now" };
   }

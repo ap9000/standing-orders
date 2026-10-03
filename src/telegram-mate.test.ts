@@ -298,6 +298,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
   });
   test("ordinary text runs the shared engine on the shared thread; the card confirms through the shared door as telegram; web and CLI read the same rows; a replay does nothing twice", async () => {
     answers.push(
+      { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
       { text: "Let me draft that.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Tighten the payout guard", goal: "Refuse a payout over the limit.", acceptance: [{ id: "c1", statement: "Over-limit payouts are refused.", evidence: ["manual-review"] }] } }] },
       { text: "Proposed a task to tighten the payout guard. Confirm it to file it." },
     );
@@ -312,8 +313,8 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(rows[0]).toMatchObject({ updateId: 2, messageId: "1002", state: "done", outcome: "answered", request: telegramRequestId(BOT, binding().id, 2), approver: "alex", text: "Please tighten the payout guard so an over-limit payout is refused" });
     expect(rows[0]!.turn).not.toBeNull();
     expect(Number(store.handle.prepare("SELECT cursor FROM bridge_lease WHERE bot_id = ?").get(BOT)?.["cursor"])).toBe(2);
-    // The engine ran twice (a tool step, then text); the session is a membership session over the enrolled ceiling.
-    expect(requests).toHaveLength(2);
+    // The engine ran three times (a capabilities read, a tool step, then text); the session is a membership session over the enrolled ceiling.
+    expect(requests).toHaveLength(3);
     expect(requests[0]!.history.filter(one => one.role === "operator").at(-1)).toMatchObject({ role: "operator", text: "Please tighten the payout guard so an over-limit payout is refused" });
     const session = store.activeMateSession("alex")!;
     expect(session).toMatchObject({ credentialKey: subscriptionCredentialKey("claude-subscription"), ceilingMicrousd: 0, ceilingDigest: ceilingDigestOf([repo]), approverGeneration: who().generation });
@@ -369,7 +370,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     const replayed = await pass();
     expect(replayed.ok && replayed.report.chatQueued).toBeFalsy();
     expect(replayed.ok && replayed.report.chatConfirmed).toBeFalsy();
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     expect(script.sends()).toHaveLength(sendsBefore);
     expect(store.handle.prepare("SELECT COUNT(*) AS n FROM task").get()?.["n"]).toBe(tasksBefore);
     expect(store.listTelegramConversations(BOT)).toHaveLength(1);
@@ -722,6 +723,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
 
   describe("outgoing replies and cards are durable before they are sent", () => {
     const draft = () => answers.push(
+      { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
       { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Add the limit", goal: "Add a payout limit.", acceptance: [{ id: "c1", statement: "The limit holds.", evidence: ["manual-review"] }] } }] },
       { text: "Proposed. Confirm to file." },
     );
@@ -749,13 +751,13 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(await pass({ transport })).toMatchObject({ ok: true, report: { problems: [expect.stringContaining("delivery may be uncertain")] } });
       expect(row().state).toBe("queued");
       expect(parts()[0]).toMatchObject({ state: "pending", attempts: 1, uncertain: 1, messageId: null });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       store.close(); store = openStore(file);
       later(PART_RETRY_MS[0]);
       expect(await pass({ transport })).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
       expect(row().state).toBe("done");
       expect(parts()[0]).toMatchObject({ state: "sent", attempts: 2, uncertain: 1 });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       expect(turns()).toBe(1);
     });
 
@@ -777,7 +779,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       const tokens = parts()[1]!.keyboard!.flat().map(one => one.callback_data);
       expect(tokens.map(one => store.getTelegramProposalAction(one)?.messageId)).toEqual([null, null]);
       expect(script.attempts()).toHaveLength(2);
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       // Too early: nothing is claimed. Then a second lost answer, counted again, with the longer wait — and no second notice.
       later(1_000);
       expect(await pass()).toMatchObject({ ok: true, report: { problems: [] } });
@@ -794,7 +796,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(script.sends()[0]!.params["reply_parameters"]).toEqual({ message_id: 1002 });
       expect(parts().map(one => [one.state, one.messageId, one.attempts])).toEqual([["sent", "100", 3], ["sent", "101", 1]]);
       expect(row()).toMatchObject({ state: "done", outcome: "replayed", replyMessageId: "100" });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       expect(turns()).toBe(1);
       // The card that finally went out carries the tokens minted with the part, now placed on the confirmed message; a tap confirms once.
       expect(script.card().rows.flat().map(one => one.callback_data)).toEqual(tokens);
@@ -825,7 +827,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(script.card().rows.flat().map(one => one.callback_data)).toEqual(planned);
       expect(parts()[1]).toMatchObject({ state: "sent", messageId: String(script.card().messageId), attempts: 2 });
       expect(row()).toMatchObject({ state: "done", outcome: "replayed" });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       expect(turns()).toBe(1);
       expect(await tapPass(planned[0]!, script.card().messageId)).toMatchObject({ ok: true, report: { chatConfirmed: 1 } });
     });
@@ -952,6 +954,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
 
   test("a console confirmation racing the tap wins once: the tap shows the recorded outcome and files nothing", async () => {
     answers.push(
+      { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
       { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Add the limit", goal: "Add a payout limit.", acceptance: [{ id: "c1", statement: "The limit holds.", evidence: ["manual-review"] }] } }] },
       { text: "Proposed. Confirm to file." },
     );
@@ -982,6 +985,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
 
   test("the other order: the tap confirms first, and a console confirmation of the same card afterwards is refused as already acted on", async () => {
     answers.push(
+      { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
       { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Add the limit", goal: "Add a payout limit.", acceptance: [{ id: "c1", statement: "The limit holds.", evidence: ["manual-review"] }] } }] },
       { text: "Proposed. Confirm to file." },
     );
@@ -1426,6 +1430,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     test("a filed task links Review & start while its scope waits, and a duplicate tap neither files nor links twice; `/task` follows the recorded state", async () => {
       origin = "https://console.example";
       answers.push(
+        { text: "", calls: [{ id: "g0", name: "get_capabilities", args: { repo: "r1" } }] },
         { text: "Drafting.", calls: [{ id: "c1", name: "propose_task", args: { repo: "r1", title: "Tighten the payout guard", goal: "Refuse a payout over the limit.", acceptance: [{ id: "c1", statement: "Over-limit payouts are refused.", evidence: ["manual-review"] }] } }] },
         { text: "Confirm it to file it." },
       );

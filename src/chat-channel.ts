@@ -720,6 +720,7 @@ export const CHAT_ACTION_PARITY: Record<
   release_commitment: { support: "direct", how: "Stops following up on one of the person's open promises, with the reason.", gap: null },
   remember: { support: "direct", how: "Proposes a correction or lasting preference as a decision or project instruction card, through the shared confirm door.", gap: null },
   get_integrations: { support: "direct", how: "Read during a turn: which chat apps, email, GitHub, project tools and monitoring are Connected, Not set up or Broken, as Settings → Integrations shows them.", gap: null },
+  get_capabilities: { support: "direct", how: "Read during a turn: which agents are signed in, which workers are online, which tools and skills work, which integrations are connected and what checks the project runs, each with its next step and settings link.", gap: null },
   ask_owner: { support: "direct", how: "One question with 2-4 options and Something else, drawn as buttons under the reply; the tapped option is sent as the person's next message.", gap: null },
   search_project_memory: { support: "direct", how: "Read during a turn: one search over decisions, references, lessons and the conversations the person may read.", gap: null },
   list_tasks: { support: "direct", how: "Read during a turn.", gap: null },

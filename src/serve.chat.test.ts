@@ -1171,6 +1171,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const cookie = await login();
     const csrf = await mint(cookie, "5");
     script.push(
+      () => answer([{ type: "tool_use", id: "g0", name: "get_capabilities", input: { repo: "r1" } }]),
       () => answer([{ type: "tool_use", id: "p1", name: "propose_task", input: {
         repo: "r1",
         title: "Polish the result cockpit",

@@ -324,6 +324,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   const readDecisions = new Map<number, number>();
   const readResults = new Map<number, { step: number; snapshot: ReviewSnapshot }>();
   const searchedMemory = new Map<string, number>();
+  const checkedCapabilities = new Map<string, number>();
   /** The turn's one question to its owner: shown with the reply only once the turn answers; a failed turn drops it. */
   const ask = (question: string, options: readonly string[]): boolean => store.recordMateAsk({ turn: turnId, thread: thread.id, question, options }, clock());
   let tokensIn = 0;
@@ -495,7 +496,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
         if (changed !== null) return changed;
       }
       progress({ kind: "tool", turn: turnId, step: steps, label: mateToolLabel(call.name) });
-      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, searchedMemory, ask, ...(input.integrations === undefined ? {} : { integrations: input.integrations }), thread: thread.id, turn: turnId, ...(promiseChannelOfTurn(input.channel) === undefined ? {} : { channel: promiseChannelOfTurn(input.channel)! }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
+      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, searchedMemory, checkedCapabilities, ask, ...(input.integrations === undefined ? {} : { integrations: input.integrations }), thread: thread.id, turn: turnId, ...(promiseChannelOfTurn(input.channel) === undefined ? {} : { channel: promiseChannelOfTurn(input.channel)! }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back (its start), keys
       // blanked. Each line stays whole JSON so a run can assert on what a tool returned rather than on the model's words.

@@ -125,7 +125,7 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(45);
+    expect(MATE_CONTRACT_VERSION).toBe(46);
     expect(MATE_CONTRACT).toContain("Ready is a saved result, not a reviewer stage");
     expect(MATE_CONTRACT).toContain("Historical missing assessments never require rerunning work");
     expect(MATE_CONTRACT).toContain("call get_result_images for that exact execution and run");
@@ -308,10 +308,24 @@ describe("the mate's turn", () => {
     expect(script.bodies[0]).toContain('get_project_knowledge');expect(script.bodies[0]).not.toContain('save_project_knowledge');
   });
 
+  test("a turn refuses a task proposed before get_capabilities ran in an earlier step, and drafts it once it has", async () => {
+    const task = { repo: "r1", title: "a new one", goal: "do the thing", acceptance: [{ id: "c1", statement: "the thing is done", evidence: ["manual-review"] }] };
+    const script = scripted([
+      answer([call("propose_task", task)]),
+      answer([call("get_capabilities", { repo: "r1" })]),
+      answer([call("propose_task", task)]),
+      text("drafted"),
+    ]);
+    const outcome = await turn("add the thing", script.fetcher);
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ ok: true, proposals: 1 });
+    expect(script.bodies[1]).toContain("Read get_capabilities first");
+  });
+
   test("canary: only admitted project display metadata names basenames; paths, accounts and free text stay scrubbed", async () => {
     store.hold(store.refFor("built-in", "in-3").id, `blocked on ${OTHER} per alex`, null, T0);
     const script = scripted([
       answer([call("recap"), call("list_repos"), call("list_decisions"), call("queue", { repo: "r1" })]),
+      answer([call("get_capabilities", { repo: "r2" })]),
       answer([call("get_task", { task: "in-3" }), call("list_tasks", {}), call("propose_next", { task: "in-2" }), call("propose_task", { repo: "r2", title: "a new one", goal: "do the thing", touches: ["src/a.ts"], acceptance: [{ id: "c1", statement: "the thing is done", evidence: ["manual-review"] }] })]),
       text("done looking"),
     ]);
