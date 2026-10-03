@@ -18,6 +18,7 @@ export const CHAT_CONTROLS = {
   workers: { label: "Manage workers", href: "/fleet" },
   slack: { label: "Manage Slack", href: "/settings/slack" },
   discord: { label: "Manage Discord", href: "/settings/discord" },
+  integrations: { label: "Set up integrations", href: "/settings/integrations" },
   settings: { label: "Open settings", href: "/settings" },
   permissions: { label: "Review permissions", href: "/settings" },
   providers: { label: "Connect an agent", href: "/settings#providers" },

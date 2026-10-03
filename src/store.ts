@@ -284,6 +284,22 @@ export function stopFactOf(store: Pick<Store, "stopQuiescenceProblem"> & Partial
 }
 export type TaskActRow = { act: TaskAct; account: string; lead: boolean; person: string | null; why: string | null; at: string };
 
+/** The lead's one question to its owner (no version bump): at most one per answered turn, two to four short options;
+ * "Something else" is implied. The tapped option comes back as the owner's next message, so nothing here is an answer:
+ * a question is open while no later message from the owner sits in its thread. */
+export const MATE_ASK_SCHEMA = `
+CREATE TABLE IF NOT EXISTS mate_ask (
+  turn         INTEGER PRIMARY KEY REFERENCES mate_turn(id),
+  thread       INTEGER NOT NULL REFERENCES mate_thread(id) ON DELETE CASCADE,
+  question     TEXT NOT NULL,
+  options_json TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mate_ask_thread ON mate_ask (thread, turn);
+`;
+export type MateAsk = { turn: number; thread: number; question: string; options: string[]; createdAt: string };
+export const MATE_ASK_OTHER = "Something else";
+
 /** Settings → Integrations (no version bump): each integration's last check. `outcome` is ok, failed, or absent (the check found
  * nothing set up, such as no `gh` sign-in). `ok_at` and `error`/`error_at` keep the last success and the last
  * failure across checks, so a row can say both. `account` is a display name only, never a credential. */
@@ -1892,7 +1908,7 @@ export type TelegramConversationPart = {
 
 /** What one outbound part is planned from: a reply slice, a card with its minted keyboard, or an image by typed identity. */
 export type TelegramConversationPartPlan =
-  | { kind: "reply"; text: string; replyTo?: string | null }
+  | { kind: "reply"; text: string; replyTo?: string | null; keyboard?: TelegramConversationPart["keyboard"] }
   | { kind: "card"; text: string; proposal: number; keyboard: TelegramConversationPart["keyboard"] }
   | { kind: "image"; text: string; taskId: string; run: number; artifact: number; sha256: string };
 
@@ -5113,6 +5129,7 @@ function initializeStore(db: Database, file: string): Store {
   db.exec(LEDGER_CHAIN_SCHEMA);
   db.exec(MONITORING_SCHEMA);
   db.exec(INTEGRATIONS_SCHEMA);
+  db.exec(MATE_ASK_SCHEMA);
   db.exec(SPEND_SCHEMA);
   // Sign-in pauses: one row per incident of a provider's sign-in no longer working.
   db.exec(PROVIDER_AUTH_SCHEMA);
@@ -23686,6 +23703,37 @@ export class Store {
     return Number(inserted.lastInsertRowid);
   }
 
+  // ---- the lead's question to its owner (ask_owner) -----------------------------
+
+  /** Record this turn's one question; false when the turn already asked one. */
+  recordMateAsk(ask: { turn: number; thread: number; question: string; options: readonly string[] }, now: Date): boolean {
+    const inserted = this.db.prepare("INSERT OR IGNORE INTO mate_ask (turn, thread, question, options_json, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(ask.turn, ask.thread, ask.question, JSON.stringify(ask.options), now.toISOString());
+    return Number(inserted.changes) === 1;
+  }
+
+  /** A failed turn keeps no question, as it keeps no drafts. */
+  dropMateAsk(turn: number): void {
+    this.db.prepare("DELETE FROM mate_ask WHERE turn = ?").run(turn);
+  }
+
+  /** The question an ANSWERED turn asked; null when it asked none or did not answer. */
+  mateAsk(turn: number): MateAsk | null {
+    const row = this.db.prepare("SELECT a.* FROM mate_ask a JOIN mate_turn t ON t.id = a.turn WHERE a.turn = ? AND t.state = 'answered'").get(turn);
+    if (row === undefined) return null;
+    const options = JSON.parse(String(row["options_json"])) as unknown;
+    return { turn: Number(row["turn"]), thread: Number(row["thread"]), question: String(row["question"]), options: Array.isArray(options) ? options.map(String) : [], createdAt: String(row["created_at"]) };
+  }
+
+  /** Open: answered, and nobody has written in its thread since the reply that asked it. */
+  mateAskOpen(turn: number): MateAsk | null {
+    const ask = this.mateAsk(turn);
+    if (ask === null) return null;
+    const later = this.db.prepare(`SELECT 1 AS hit FROM mate_message WHERE thread = ? AND role = 'operator'
+      AND id > COALESCE((SELECT MAX(id) FROM mate_message WHERE thread = ? AND turn = ? AND role = 'assistant'), 9223372036854775807) LIMIT 1`).get(ask.thread, ask.thread, turn);
+    return later === undefined ? ask : null;
+  }
+
   // ---- the screenshots a turn selected (v64) ------------------------------------
 
   /**
@@ -25976,6 +26024,11 @@ export class Store {
     return Number(inserted.lastInsertRowid);
   }
 
+  /** Whether a message from this chat is already waiting on, or being answered from, this bot message (a tapped question). */
+  telegramConversationWaitingOn(binding: number, messageId: string): boolean {
+    return this.db.prepare("SELECT 1 AS hit FROM telegram_conversation WHERE binding = ? AND message_id = ? AND state IN ('queued', 'running') LIMIT 1").get(binding, messageId) !== undefined;
+  }
+
   getTelegramConversation(id: number): TelegramConversation | null {
     const row = this.db.prepare("SELECT * FROM telegram_conversation WHERE id = ?").get(id);
     return row === undefined ? null : readTelegramConversation(row);
@@ -26140,7 +26193,7 @@ export class Store {
         const image = part.kind === "image" ? part : null;
         insert.run(
           id, ordinal, part.kind, part.text, part.kind === "reply" ? part.replyTo ?? null : null, part.kind === "card" ? part.proposal : null,
-          part.kind === "card" && part.keyboard != null ? JSON.stringify(part.keyboard) : null, stamp,
+          (part.kind === "card" || part.kind === "reply") && part.keyboard != null ? JSON.stringify(part.keyboard) : null, stamp,
           image?.taskId ?? null, image?.run ?? null, image?.artifact ?? null, image?.sha256 ?? null,
         );
       });

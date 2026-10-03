@@ -19,6 +19,7 @@ import { mateToolLabel, type MateProgress } from "./mate-progress.js";
 import { createHash } from "node:crypto";
 import type { ChatConfig, DirectChatProviderId, MateProposalKind, MateSession, MateThread, MateTurnEvidence, Store, SubscriptionChatProviderId } from "./store.js";
 import { RESULT_IMAGES_PER_TURN_CAP } from "./chat-evidence.js";
+import type { Integration } from "./integrations.js";
 import type { VerifiedApprover } from "./principal.js";
 import { isVerifiedApprover, reproveApprover } from "./principal.js";
 import {
@@ -84,6 +85,8 @@ export type MateTurnInput = {
   evidenceRoot?: string;
   /** How this surface delivers the images a turn selects: Telegram sends them as documents after the reply; absent means identity only. */
   mediaDelivery?: "documents";
+  /** The integrations as Settings → Integrations shows them (get_integrations); absent: read from the files beside the database. */
+  integrations?: () => readonly Integration[];
   /**
    * A channel's own standing, re-proved where the approver's is: before
    * admission, before every provider dispatch, after every provider wait,
@@ -125,26 +128,27 @@ export type MateTurnOutcome =
   | { ok: false; refused: MateRefusal; message: string }
   | { ok: false; turn: number; failed: MateFailure; message: string; unknownSpend: boolean };
 
+/** What happened, what it means, and one next step: plain words a person can act on, never internal terms. */
 export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
-  "empty-message": `a message is 1 to ${MATE_MESSAGE_MAX_CHARS} characters`,
-  "secret-in-message": "that looks like a credential — the mate never forwards or stores those",
-  "secret-in-context": "fleet context contains something credential-shaped — the mate refuses to send it; find and remove it first",
-  standing: "your approver standing changed — sign in again",
-  unpriced: "no pinned price for the chat model — re-save the chat configuration to pin one",
-  "ceiling-changed": "the admitted projects changed since this session was minted — mint a new one",
-  "not-yours": "that mate session is not yours to continue",
-  "thread-closed": "that thread is closed — start a new one",
-  latched: "a turn with unknown cost blocks this credential — acknowledge it first",
-  concurrent: "one turn at a time — the last one is still running",
-  "daily-cap": "the daily turn cap is reached",
-  "session-exhausted": "this mate session's spend ceiling would be exceeded — mint a new one to continue",
-  "session-ended": "this mate session has ended — mint a new one to continue",
-  "over-budget": "the weekly chat spend ceiling would be exceeded",
-  "monthly-budget": "a monthly budget this counts toward holds it: used up, or its cost can't be priced yet (the Spend page says which)",
-  policy: "the organisation policy doesn't allow this chat's provider or model (Settings → Policy says which)",
-  "invalid-request": "This message could not be identified. Reload the conversation before sending it.",
+  "empty-message": `That message was empty or too long, so it wasn't sent. Write 1 to ${MATE_MESSAGE_MAX_CHARS} characters and send it again.`,
+  "secret-in-message": "That message looks like it contains a password or key, so it wasn't sent or saved. Remove it and send the message again.",
+  "secret-in-context": "Something saved in your projects looks like a password or key, so the lead can't read your projects safely. Remove it from the task or note it's in, then try again.",
+  standing: "Your sign-in changed, so the lead can't act for you right now. Sign in again.",
+  unpriced: "The chat model has no saved price, so its cost can't be tracked. Save the chat settings again to fix it.",
+  "ceiling-changed": "Your projects changed since this chat started, so it can't go on. Start a new chat.",
+  "not-yours": "This chat belongs to someone else, so you can't continue it. Start your own chat.",
+  "thread-closed": "This conversation is closed. Start a new one to keep going.",
+  latched: "An earlier reply stopped before its cost was known, so chat is paused. Acknowledge that reply on the Chat page, then send again.",
+  concurrent: "The lead is still answering your last message. Wait for that reply, then send this one.",
+  "daily-cap": "You've reached today's limit on chat replies, so this one wasn't sent. Try again tomorrow.",
+  "session-exhausted": "This chat has used its spending limit. Start a new chat to keep going.",
+  "session-ended": "This chat has ended. Start a new chat to keep going.",
+  "over-budget": "This reply would go over this week's chat spending limit, so it wasn't sent. Raise the weekly limit in chat settings to keep going.",
+  "monthly-budget": "A monthly budget this chat counts toward is used up, or its cost can't be worked out yet. Open the Spend page to see which.",
+  policy: "Your organisation's policy doesn't allow this chat's provider or model. Open Settings → Policy to see what's allowed.",
+  "invalid-request": "This message couldn't be matched to your conversation. Reload the conversation, then send it again.",
   "request-changed": "That send was already received with different text or task context. Reload the conversation before sending a new message.",
-  channel: "this conversation's connection changed — reconnect it before sending again",
+  channel: "This conversation's connection changed, so the message wasn't sent. Reconnect it, then send again.",
 };
 
 const READ_TOOLS = new Set(["get_brief", "get_project_context", "get_actions", "get_action_status", "get_skills", "get_acceptance_evidence", "recap", "list_repos", "list_tasks", "get_task", "get_result", "get_result_images", "get_controls", "get_agents", "get_project_knowledge", "get_task_conversation", "get_diff", "get_check_log", "get_project_tools", "get_flows", "get_flow_insights", "list_decisions", "get_decision", "queue"]);
@@ -306,6 +310,9 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   let steps = 0;
   const readDecisions = new Map<number, number>();
   const readResults = new Map<number, { step: number; snapshot: ReviewSnapshot }>();
+  const searchedMemory = new Map<string, number>();
+  /** The turn's one question to its owner: shown with the reply only once the turn answers; a failed turn drops it. */
+  const ask = (question: string, options: readonly string[]): boolean => store.recordMateAsk({ turn: turnId, thread: thread.id, question, options }, clock());
   let tokensIn = 0;
   let tokensOut = 0;
   let settled = 0;
@@ -325,6 +332,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   const fail = (failed: MateFailure, message: string, unknownSpend: boolean): MateTurnOutcome => {
     now = clock();
     store.finalizeMateTurn(turnId, started.generation, { state: "failed", settledMicrousd: settled, unknownSpend, tokensIn, tokensOut, failureReason: failed }, now);
+    store.dropMateAsk(turnId);
     return { ok: false, turn: turnId, failed, message, unknownSpend };
   };
   /** The turn's own row, re-read: still running under our generation, or someone ended it under us. */
@@ -366,7 +374,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
       now,
     );
     if (!step.ok) {
-      if (step.reason === "latched") return fail("latched", "a turn with unknown cost latched this credential mid-conversation — acknowledge it first", false);
+      if (step.reason === "latched") return fail("latched", "an earlier reply stopped before its cost was known, so chat is paused — acknowledge that reply on the Chat page, then send again", false);
       return { ok: false, turn: turnId, failed: "superseded", message: "this turn was ended before its next step", unknownSpend: false };
     }
     const stepStarted = store.startChatTurn(step.id, now);
@@ -474,7 +482,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
         if (changed !== null) return changed;
       }
       progress({ kind: "tool", turn: turnId, step: steps, label: mateToolLabel(call.name) });
-      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
+      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, searchedMemory, ask, ...(input.integrations === undefined ? {} : { integrations: input.integrations }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back (its start), keys
       // blanked. Each line stays whole JSON so a run can assert on what a tool returned rather than on the model's words.

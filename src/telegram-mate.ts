@@ -26,7 +26,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { MATE_MESSAGE_MAX_CHARS, runMateTurn } from "./mate.js";
 import { confirmMateProposal, dismissMateProposal, type DoorOptions, type DoorOutcome } from "./mate-doors.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
-import type { MateProposal, Store, TelegramBinding, TelegramConversation } from "./store.js";
+import { MATE_ASK_OTHER, type MateAsk, type MateProposal, type Store, type TelegramBinding, type TelegramConversation } from "./store.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
 import { phoneText } from "./telegram-status.js";
 import { TeamLeads } from "./team-leads.js";
@@ -133,6 +133,15 @@ function keyboardWith(callbacks: CallbackKeyboard | null, link: InlineButton[] |
 // ---- proposal cards on the wire ------------------------------------------------------
 
 /** One inline button: an opaque callback token (a real in-chat act) or a url (navigation, never authority). */
+/** The buttons under the lead's question: options two to a row, then "Something else". Each names the turn and the
+ * option's place, nothing more; a tap re-proves that the question is still open and is the tapper's own. */
+export function askKeyboard(ask: MateAsk): CallbackKeyboard {
+  const rows: CallbackKeyboard = [];
+  for (let at = 0; at < ask.options.length; at += 2) rows.push(ask.options.slice(at, at + 2).map((label, offset) => ({ text: label.slice(0, 60), callback_data: `ask:${ask.turn}:${at + offset}` })));
+  rows.push([{ text: MATE_ASK_OTHER, callback_data: `ask:${ask.turn}:x` }]);
+  return rows;
+}
+
 export type InlineButton = { text: string; callback_data: string } | { text: string; url: string };
 type Keyboard = InlineButton[][];
 /** What a part persists: callback tokens only. A url is minted at send time, never stored. */
@@ -620,6 +629,9 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
       return store.transact(() => {
         const now = clock();
         const parts: Parameters<Store["planTelegramConversationParts"]>[3][number][] = splitParts(reply).map((text, index) => ({ kind: "reply", text, replyTo: index === 0 ? row.messageId : null }));
+        // The lead's question to its owner: one tap per option, then "Something else".
+        const ask = store.mateAsk(turn);
+        if (ask !== null) parts.push({ kind: "reply", text: phoneText(ask.question, 1_000), keyboard: askKeyboard(ask) });
         // Only a turn that answered may have its selection sent: a failed or revoked turn's rows were deleted with its drafts, and the state is read again here.
         const selected = store.getMateTurn(turn)?.state === "answered" ? store.listMateTurnEvidence(turn) : [];
         for (const image of selected) parts.push({ kind: "image", text: image.caption, taskId: image.taskId, run: image.run, artifact: image.artifact, sha256: image.sha256 });

@@ -1139,6 +1139,49 @@ describe("Slack shared chat", () => {
     expect(String(sends().at(-1)!.args.text)).toContain("It picks the card up again now.");
   });
 
+  test("the lead's question arrives with its options and Something else; a tap sends the option as the owner's next message, once", async () => {
+    const buttonsOf = (call: { args: Record<string, unknown> }) =>
+      ((call.args.blocks as Array<{ type: string; elements?: Array<{ text: { text: string }; value?: string; action_id: string }> }>).find(block => block.type === "actions")?.elements ?? []);
+    const press = async (id: string, token: string, ts: string) => {
+      receiveSlack(state, ID, "interactive", { ...action(token, ts), message: {}, actions: [{ action_id: id, value: token, action_ts: `1789700001.${String(++serial).padStart(6, "0")}` }] }, now);
+      await processSlackEvent(options);
+      await drain();
+    };
+    const asked = () => {
+      const request = (runner as unknown as { mock: { calls: [{ history: { role: string; text?: string }[] }][] } }).mock.calls.at(-1)![0];
+      return String(request.history.filter((one) => one.role === "operator").at(-1)?.text);
+    };
+    answers.push(
+      { text: "", calls: [{ id: "q1", name: "ask_owner", args: { question: "Which page first?", options: ["Login", "Signup"] } }] },
+      { text: "One choice changes the plan." },
+    );
+    expect(receive("Fix the sign-in pages")).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    const question = sends().at(-1)!;
+    expect(String(question.args.text)).toContain("Which page first?");
+    const buttons = buttonsOf(question);
+    expect(buttons.map(one => one.text.text)).toEqual(["Login", "Signup", "Something else"]);
+    const askTs = String(state.db.prepare("SELECT message FROM slack_part WHERE json_extract(payload,'$.ask') IS NOT NULL ORDER BY id DESC LIMIT 1").get()!.message);
+    // Something else asks for words and keeps the buttons.
+    await press("toolroll_question_words", buttons[2]!.value!, askTs);
+    expect(String(sends().at(-1)!.args.text)).toContain("Type your answer here");
+    // A tap is the owner's next message: the lead reads "Login" as what they said.
+    const turns = (runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+    answers.push({ text: "Starting with the login page." });
+    await press("toolroll_question_choice", buttons[0]!.value!, askTs);
+    expect(sends().some(one => one.method === "chat.update" && one.args.ts === askTs && String(one.args.text).includes("You chose: Login") && buttonsOf(one).length === 0)).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    expect((runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(turns + 1);
+    expect(asked()).toBe("Login");
+    expect(String(sends().at(-1)!.args.text)).toContain("Starting with the login page.");
+    // A second tap changes nothing.
+    await press("toolroll_question_choice", buttons[1]!.value!, askTs);
+    await processSlackEvent(options);
+    expect((runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(turns + 1);
+  });
+
   test("a message to a teammate by name lands on its desk instead of the lead, and its answer comes back in Slack (v96)", async () => {
     now = new Date(now.getTime() + 30_000);
     store.createTeammate({ repo, handle: "maya", soul: TEAMMATE_TEMPLATES[0]!.soul, model: null, manager: "alex", by: "alex" }, now);

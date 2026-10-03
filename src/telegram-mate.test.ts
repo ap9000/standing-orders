@@ -251,6 +251,32 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.getMateProposal(id)?.outcome).toMatchObject({ok:true,via:"web",said:"Task cancelled."});
     expect(executeMateTool({store,who:who(),now,step:1,readDecisions:new Map(),draft:()=>null},"get_action_status",{proposal:id})).toMatchObject({ok:true,body:{state:"confirmed",outcome:{ok:true,via:"web"}}});
   });
+  test("the lead's question arrives with one button per option and Something else; a tap is the owner's next message, once (ask_owner)", async () => {
+    answers.push(
+      { text: "", calls: [{ id: "q1", name: "ask_owner", args: { question: "Ship today or Friday?", options: ["Today", "Friday"] } }] },
+      { text: "It depends on one thing." },
+    );
+    script.updates.push([textUpdate(2, "When should the release go out?")]);
+    await pass();
+    const asked = script.sends().find(call => String(call.params["text"]) === "Ship today or Friday?")!;
+    const rows = (asked.params["reply_markup"] as { inline_keyboard: { text: string; callback_data: string }[][] }).inline_keyboard;
+    expect(rows.map(row => row.map(one => one.text))).toEqual([["Today", "Friday"], ["Something else"]]);
+    // Something else asks for words; nothing is sent to the lead.
+    await tapPass(rows[1]![0]!.callback_data, asked.messageId!);
+    expect(script.acks().at(-1)).toBe("Type your answer as a message.");
+    expect(requests).toHaveLength(2);
+    answers.push({ text: "Friday it is." });
+    await tapPass(rows[0]![1]!.callback_data, asked.messageId!);
+    expect(script.acks().at(-1)).toBe("Sent: Friday");
+    expect(script.edits().at(-1)).toContain("You chose: Friday");
+    expect(requests).toHaveLength(3);
+    expect(requests.at(-1)!.history.filter(one => one.role === "operator").at(-1)).toMatchObject({ text: "Friday" });
+    expect(script.texts()).toContain("Friday it is.");
+    // The question is answered: a later tap sends nothing.
+    await tapPass(rows[0]![0]!.callback_data, asked.messageId!);
+    expect(script.acks().at(-1)).toBe("That question was already answered.");
+    expect(requests).toHaveLength(3);
+  });
   test("a hidden path uses complete review instead of offering incomplete confirmation",()=>{
     const preview=proposalPreview(store,{kind:'action',payload:{operation:'knowledge_instructions',request:{},repo,title:'Save project instructions',terms:['Use /Users/operator/project/reference.md'],stamp:'fixture',state:{}}} as Parameters<typeof proposalPreview>[1],[repo]);
     expect(preview.buttons).toBe(false);expect(preview.text).not.toContain('/Users/operator/project/reference.md');

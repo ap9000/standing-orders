@@ -597,6 +597,31 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect((await fetch(url('/chat?format=workspace'), { redirect: 'manual' })).status).toBe(303);
   });
 
+  test("the lead's question shows its options as buttons that send themselves, plus Something else, until the owner answers (ask_owner)", async () => {
+    const cookie = await login(); const csrf = await mint(cookie);
+    const read = async () => (await (await fetch(url('/chat?format=workspace'), { headers: { cookie } })).json()) as import('./browser-workspace.js').BrowserWorkspace;
+    script.push(
+      () => answer([{ type: 'tool_use', id: 'q1', name: 'ask_owner', input: { question: 'Ship today or Friday?', options: ['Today', 'Friday'] } }]),
+      () => answer([{ type: 'text', text: 'It depends on one thing.' }]),
+    );
+    expect((await sendJson(cookie, { csrf, message: 'When should the release go out?' })).status).toBe(202);
+    await settle();
+    const asked = (await read()).conversation!.messages.at(-1)!.html;
+    expect(asked).toContain('It depends on one thing.');
+    expect(asked).toContain('<strong>Ship today or Friday?</strong>');
+    expect([...asked.matchAll(/<form method="post" action="\/chat"[^>]*>.*?name="message" value="([^"]+)"/g)].map(one => one[1])).toEqual(['Today', 'Friday']);
+    expect(asked).toContain('<label for="lead-message" class="so-suggestion so-owner-ask-other">Something else</label>');
+    // A tap is the same POST as a typed message; once answered, the buttons are gone.
+    script.push(() => answer([{ type: 'text', text: 'Friday it is.' }]));
+    expect((await sendJson(cookie, { csrf, message: 'Friday' })).status).toBe(202);
+    await settle();
+    const after = (await read()).conversation!.messages;
+    expect(after.map(one => one.text).slice(-2)).toEqual(['Friday', 'Friday it is.']);
+    // The question stays readable above the answer; only its buttons are gone.
+    expect(after.at(-3)!.html).toContain('<strong>Ship today or Friday?</strong>');
+    expect(after.some(one => one.html.includes('name="message"') || one.html.includes('Something else'))).toBe(false);
+  });
+
   test('React projects page lists the same projects as compact rows', async () => {
     const cookie = await login();
     const response = await fetch(url('/projects?format=workspace'), { headers: { cookie } });

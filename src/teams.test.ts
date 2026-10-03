@@ -241,6 +241,28 @@ describe("Teams shared chat", () => {
     expect(store.flowComments(card.id).map(one => one.body)).toEqual(["It's the Dell."]);
   });
 
+  test("the lead's question arrives as card buttons with Something else, and a tap is the owner's next message (ask_owner)", async () => {
+    expect(pairAs("alex", ALEX, DM_ALEX)).not.toBeNull();
+    answers.push(
+      { text: "", calls: [{ id: "q1", name: "ask_owner", args: { question: "Which customers first?", options: ["Paid", "Trial", "All"] } }] },
+      { text: "That decides the order." },
+    );
+    expect(receive(activity(DM_ALEX, ALEX, "Email customers about the outage"))).toBe(true);
+    await processTeamsEvent(options); await drain();
+    expect(lastText()).toContain("Which customers first?");
+    expect(lastActions().map(action => action["title"])).toEqual(["Paid", "Trial", "All", "Something else"]);
+    const paid = lastActions()[0] as { data: Record<string, unknown> };
+    const askId = String(state.prepare("SELECT message FROM chat_part WHERE json_extract(payload,'$.ask') IS NOT NULL").get()?.message);
+    answers.push({ text: "Paid customers first." });
+    expect(receive({ type: "message", id: `tap-${++ids}`, serviceUrl: SERVICE, from: { id: ALEX }, recipient: { id: `28:${APP}` }, conversation: { id: DM_ALEX, conversationType: "personal", tenantId: TENANT }, replyToId: askId, value: paid.data })).toBe(true);
+    await processTeamsEvent(options); await drain();
+    expect(sends().some(call => call.method === "PUT" && JSON.stringify(call.body).includes("You chose: Paid"))).toBe(true);
+    await processTeamsEvent(options); await drain();
+    const request = vi.mocked(options.subscriptionRunner!).mock.calls.at(-1)![0];
+    expect(request.history.filter(one => one.role === "operator").at(-1)).toMatchObject({ text: "Paid" });
+    expect(lastText()).toContain("Paid customers first.");
+  });
+
   test("a flow decision in Teams: Approve / Edit / Send back on the card, and Send back takes the next message as the note (v88)", async () => {
     expect(pairAs("alex", ALEX, DM_ALEX)).not.toBeNull();
     now = new Date(now.getTime() + 30_000);

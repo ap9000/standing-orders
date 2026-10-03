@@ -2042,6 +2042,28 @@ function applyCallback(context: Context, update: Update, effects: Effect[]): voi
     }
     return;
   }
+  // The lead's question to its owner: an option is sent as their next message; "Something else" asks them to type it.
+  const askTap = /^ask:([1-9][0-9]{0,14}):([0-3]|x)$/.exec(token);
+  if (askTap !== null) {
+    if (tapChat !== binding.chatId || context.conversation === undefined) { report.ignored++; return; }
+    const turn = Number(askTap[1]);
+    const ask = store.getMateTurn(turn)?.approver === binding.approver ? store.mateAskOpen(turn) : null;
+    if (ask === null) { ack("That question was already answered."); if (message.text) editText(message.text); return; }
+    if (store.telegramConversationWaitingOn(binding.id, String(message.message_id))) { ack("Your answer is on its way."); return; }
+    if (askTap[2] === "x") { ack("Type your answer as a message."); return; }
+    const option = ask.options[Number(askTap[2])];
+    if (option === undefined) { ack("That option is no longer there."); return; }
+    const focused = store.chatFocus("telegram", binding.id);
+    store.enqueueTelegramConversation({
+      binding, updateId: update.update_id, messageId: String(message.message_id), replyTo: null,
+      request: telegramRequestId(botId, binding.id, update.update_id), text: option,
+      context: focused === null ? null : focusContextFor(focused), taskId: focused, sourceRun: null,
+    }, clock());
+    report.chatQueued = (report.chatQueued ?? 0) + 1;
+    ack(`Sent: ${option}`.slice(0, 190));
+    editText(`${message.text ?? ask.question}\n\nYou chose: ${option}`.slice(0, 4000));
+    return;
+  }
   const action = store.getTelegramAction(token);
   if (action === null && context.conversation !== undefined && store.getTelegramProposalAction(token) !== null) {
     // A proposal card's button: the shared confirm door, inside this
