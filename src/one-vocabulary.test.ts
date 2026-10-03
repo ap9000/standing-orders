@@ -230,7 +230,7 @@ describe("one source for requirements, checks and times (c2)", () => {
     const window = new Window();
     try {
       window.document.body.innerHTML = task;
-      const times = [...window.document.querySelectorAll("time[datetime]")];
+      const times = [...window.document.querySelectorAll("time[data-when]")];
       expect(times.length).toBeGreaterThan(0);
       localizeTimes(window.document as unknown as ParentNode, now, zone);
       for (const node of times) {

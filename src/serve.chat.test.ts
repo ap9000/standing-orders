@@ -138,7 +138,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
     expect(html).toContain("Chat isn’t available in demo mode");
     expect(html).toContain("Demo data never contacts an external model. Start Toolroll with a real project to use chat: <code>npx toolroll up</code> in your repository.");
-    expect(html).not.toContain("chat is off.");
+    expect(html).not.toContain("Chat is off.");
   });
 
   test("the saved chat catch-up identifies the unfinished prerequisite", async () => {

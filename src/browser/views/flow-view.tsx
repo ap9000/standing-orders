@@ -11,6 +11,7 @@ import { Background, BackgroundVariant, BaseEdge, Controls, EdgeLabelRenderer, H
 import "@xyflow/react/dist/style.css";
 import { Bell, BellOff, Bot, CalendarClock, Download, Ellipsis, Hourglass, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, Globe, Mail, Wrench, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
 import { threadWhen } from "./task-view.js";
+import { deadlineWords, shortWhen, viewerZone } from "../../when-html.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
@@ -300,11 +301,8 @@ function slug(title: string, taken: Set<string>): string {
 
 /** The one formatter (when-html.ts), in the viewer's zone. */
 const when = (at: string) => threadWhen(at);
-/** A card's deadline in the viewer's own clock: "No reply by 16:30" today, "No reply by Tomorrow 16:30", "Moves on Oct 2" further out. */
-const deadlineWords = (deadline: { at: string; label: string }) => {
-  const words = threadWhen(deadline.at);
-  return /^(?:\d|Tomorrow|Yesterday)/.test(words) ? `${deadline.label} ${words}` : `${deadline.label.replace(/ at$/, "")} ${words}`;
-};
+/** The same, keeping the time of day on a date further out ("Sep 28 16:39"): a deadline or history line needs its hour. */
+const whenAt = (at: string, now = new Date()) => Number.isNaN(new Date(at).getTime()) ? "" : shortWhen(at, now, viewerZone(), true);
 /** Minutes as people say them: "45 min", "4 h", "3 days". */
 const minutesWords = (minutes: number) => minutes % 1440 === 0 ? `${minutes / 1440} day${minutes === 1440 ? "" : "s"}` : minutes % 60 === 0 ? `${minutes / 60} h` : `${minutes} min`;
 
@@ -442,7 +440,7 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
     <Discussion card={card} view={view} csrf={csrf} apply={apply} />
     <div className="flex flex-col gap-1.5">
       <h3 className="text-[13px] font-semibold">History</h3>
-      <ol className="flex flex-col gap-1.5">{card.history.map((line, index) => <li key={index} className="text-[12px]"><span className="text-muted-foreground">{when(line.at)}</span> · {line.text}</li>)}</ol>
+      <ol className="flex flex-col gap-1.5">{card.history.map((line, index) => <li key={index} className="text-[12px]"><span className="text-muted-foreground">{whenAt(line.at)}</span> · {line.text}</li>)}</ol>
     </div>
     {view.canEdit && card.state === "active" && <Button variant="ghost" size="sm" className="self-start text-destructive" disabled={busy} onClick={() => void act(`${base}/cancel`, {})}>Cancel card</Button>}
   </div>;

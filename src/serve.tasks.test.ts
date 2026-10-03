@@ -148,7 +148,7 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     expect(cockpit).toContain('data-next-action="compare-contest"');
     expect(cockpit).toContain(`<a class="button-link" href="/contest/${contestId}">Compare results</a>`);
     expect(cockpit).toContain(`<a href="/contest/${contestId}">compare the tournament and pick →</a>`);
-    expect(cockpit).not.toContain("pick this result");
+    expect(cockpit).not.toContain("Pick this result");
     expect(cockpit).not.toContain('name="nonce"');
   });
 
@@ -215,7 +215,7 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     // The screen now states the decision.
     const after = await (await fetch(url(`/contest/${contestId}`), { headers: { cookie } })).text();
     expect(after).toContain("Picked by alex");
-    expect(after).not.toContain("pick this result");
+    expect(after).not.toContain("Pick this result");
   });
 
   test("the comparison reads at a glance (arc 6): one table column per agent, cards side by side, same facts", async () => {
@@ -1877,7 +1877,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const task = await (await fetch(url("/t/t-membership"), { headers: { cookie } })).text();
     expect(task).toContain("$2.75 API-price equivalent from subscription usage (not an API charge)");
     expect(task).toContain("subscription · $2.75 API-price equivalent (not an API charge)");
-    expect(task).not.toContain(">cost<");
+    expect(task).not.toContain(">Cost<");
 
     const runPage = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(runPage).toContain("subscription · $2.75 API-price equivalent (not an API charge)");

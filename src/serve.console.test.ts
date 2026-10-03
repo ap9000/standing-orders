@@ -234,7 +234,7 @@ describe("the operations console", () => {
     writeFileSync(join(evidenceRoot, briefArtifact?.key as string), "tampered");
     const page2 = await (await fetch(url(target), { headers: { cookie } })).text();
     expect(page2).toContain("approval is blocked");
-    expect(page2).not.toContain("approve this scope");
+    expect(page2).not.toContain("Approve this scope");
   });
 
   test("a high-risk, strict revision keeps its terms on the task page, the approval card, and chat after the installation's defaults change; the CI draft reads the same (contract handoff task 2)", async () => {
@@ -2171,7 +2171,7 @@ describe("the rolled-up board — every project, one ceiling", () => {
     // status does not travel through it.
     expect(board).toContain("waits on t-secret");
     expect(board).not.toContain("waits on t-secret \u2014");
-    expect(board).not.toContain("building now");
+    expect(board).not.toContain("Building now");
   });
 });
 
@@ -2452,7 +2452,7 @@ describe("routines on the console", () => {
     expect(page).not.toContain('type="password"');
     expect(nonceOf(page)).toBeNull();
     // Firing it from the page refuses in words (no run-now form either).
-    expect(page).not.toContain("run now");
+    expect(page).not.toContain("Run now");
     // Corrupt snapshot bytes read the same way: closed, with their own words.
     store.raw().prepare("UPDATE routine SET approved_route_json = '{\"version\":1' WHERE id = ?").run(id);
     page = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
@@ -2478,7 +2478,7 @@ describe("routines on the console", () => {
     page = await (await fetch(url(`/routines/${id}`), { headers: { cookie } })).text();
     expect(page).toContain("do not verify");
     expect(page).not.toContain('type="password"');
-    expect(page).not.toContain("run now");
+    expect(page).not.toContain("Run now");
     expect(nonceOf(page)).toBeNull();
     expect(page).toContain('id="agents-recovery"');
     // The refresh act: a session's own POST, nothing approved by it.
@@ -2717,7 +2717,7 @@ describe("since you last looked", () => {
 
       // First look: no previous anchor, no strip.
       const first = await (await fetch(`${base}/board`, { headers: { cookie } })).text();
-      expect(first).not.toContain("since you last looked");
+      expect(first).not.toContain("Since you last looked");
 
       // Work concludes while the operator is away.
       store.createTask({ id: "t-d", title: "w" }, T0);
@@ -3424,10 +3424,10 @@ describe("round 4 — liveness is proved from the current lease, never guessed f
     expect(watching).toContain(`Build #${liveRun} · night-shift-1 · running`);
     expect(watching).toContain('id="run-peek"');
     expect(watching).toContain("Watching…");
-    expect(watching).not.toContain("the live file view is off");
+    expect(watching).not.toContain("The live file view is off");
     const runOn = await (await fetch(url(`/r/${liveRun}`), { headers: { cookie: cookieOn } })).text();
     expect(runOn).toContain("Watching…");
-    expect(runOn).not.toContain("the live file view is off");
+    expect(runOn).not.toContain("The live file view is off");
 
     // The orphan's task page has no panel at all — there is nothing live.
     const orphanTask = await (await fetch(url("/t/orphan"), { headers: { cookie: cookieOn } })).text();

@@ -62,6 +62,12 @@ describe("the Tasks list", () => {
     const answer = page.match(/<li data-task="answer"[^]*?<\/li>/)![0];
     expect(answer).not.toContain("bg-primary");
     expect(answer).toMatch(/<span class="sr-only[^"]*" data-headline="Needs you">Needs you<\/span>/);
+    // With no heading above it (an ungrouped list, or a row no group covers), the same row shows its headline.
+    for (const page of [html(view({ groups: null })), html(view({ groups: [{ key: "review", label: "Review", count: 1 }] }))]) {
+      const loose = page.match(/<li data-task="answer"[^]*?<\/li>/)![0];
+      expect(loose).not.toContain("sr-only\" data-headline");
+      expect(loose).toMatch(/<span data-ask="decide" data-headline="Needs you" class="(?![^"]*sr-only)[^"]*">[^]*?Needs you<\/span>/);
+    }
     // No coloured border announces a wait.
     expect(page).not.toMatch(/border-l-/);
   });

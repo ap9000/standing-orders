@@ -225,7 +225,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const granted = approve(store, "t-a", "alex", T0, store.getScope("t-a")?.digest as string, approverToken);
     expect(granted.ok).toBe(true);
     const clear = await (await fetch(url("/next"), { headers: { cookie } })).text();
-    expect(clear).not.toContain("approve this scope");
+    expect(clear).not.toContain("Approve this scope");
     expect(workspaceOf(clear).sensitive).toBe(false);
   });
 
@@ -974,7 +974,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     // The plan is open in its own section: no opener, no "approve exactly this".
     expect(page).toContain('<section class="task-plan-review" aria-label="Approve the plan"><form method="post" action="/t/t-yes/approve"');
     expect(page).not.toContain('<span class="button-link">Approve plan</span></summary>');
-    expect(page).not.toContain("approve exactly this:");
+    expect(page).not.toContain("Approve exactly this:");
     // Plain rows, then who builds, then the one act, its after-line and the secondary acts; Details last.
     const rows = page.indexOf('<dl class="approval-rows">');
     const confirm = page.indexOf('<div class="approval-act" id="approval-confirm">');
