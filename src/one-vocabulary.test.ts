@@ -1,6 +1,6 @@
 /** One vocabulary for a task's state: the same fixture tasks walk through the
- * Tasks list, the task page and the result page reading the same state words,
- * and Crew reads each waiting task's list group; requirements, Project checks and PR CI read one source each; every
+ * Tasks list, the task page, the result page and Crew and read the same state
+ * words; requirements, Project checks and PR CI read one source each; every
  * time goes through one formatter; each Review row says its own reason, one
  * verb opens a result, nothing else is called Details, and labels are sentence
  * case. Real HTTP against an ephemeral port over a seeded throwaway store. */
@@ -137,7 +137,9 @@ describe("one state per task, the same words on every surface (c1)", () => {
     };
     for (const [id, words] of Object.entries(expected)) {
       const row = rows.find(one => one.id === id)!;
+      const crew = workspace.crew.find(one => one.id === id)!;
       expect(row.status.label, `${id} list`).toBe(words);
+      expect(crew.label, `${id} Crew`).toBe(words);
       expect(await taskHeadline(id), `${id} task page`).toBe(words);
       if (id !== "agent-gave-up") {
         const result = await resultOf(id);
@@ -147,16 +149,14 @@ describe("one state per task, the same words on every surface (c1)", () => {
     }
   });
 
-  test("Crew reads each waiting task's list group, so one group never shows two words", async () => {
+  test("Crew reads each task's headline, never its list group or chip", async () => {
     const workspace = await tasksView();
     const rows = (workspace.view as TasksView).rows;
     const crew = Object.fromEntries(workspace.crew.map(one => [one.id, one.label]));
-    expect(crew).toEqual({ "search-typo-tolerance": "Review", "gift-card-hold": "Review", "coupon-plan-changed": "Review", "order-export-refuted": "Review", "agent-gave-up": "Unblock" });
-    for (const row of rows) expect(crew[row.id], row.id).toBe(row.ask === null ? row.status.label : ASK_LABEL[row.ask]);
-    // Within a group, one word: never "Ready for review" beside "Needs you".
-    const byGroup = new Map<string, Set<string>>();
-    for (const row of rows.filter(one => one.ask !== null)) byGroup.set(row.ask!, (byGroup.get(row.ask!) ?? new Set()).add(crew[row.id]!));
-    for (const [group, words] of byGroup) expect([...words], group).toEqual([ASK_LABEL[group as keyof typeof ASK_LABEL]]);
+    expect(crew).toEqual({ "search-typo-tolerance": "Ready for review", "gift-card-hold": "Needs you", "coupon-plan-changed": "Needs you", "order-export-refuted": "Ready for review", "agent-gave-up": "Failed" });
+    for (const row of rows) expect(crew[row.id], row.id).toBe(row.status.label);
+    const groupWords = new Set<string>(Object.values(ASK_LABEL));
+    for (const item of workspace.crew) expect(groupWords.has(item.label), item.id).toBe(false);
   });
 
   test("a report that doesn't match its changes is Mismatch; a plan changed after building is Plan changed", async () => {

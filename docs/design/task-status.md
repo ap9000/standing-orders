@@ -18,7 +18,7 @@
 
 ## The model
 
-**1. One headline status per task**, from a fixed, ordered set, the same words everywhere (Tasks list, task page, build page, Chat result card, Telegram/Slack card, `toolroll status`; Crew shows a waiting task's Tasks list group instead, Decide, Review or Unblock):
+**1. One headline status per task**, from a fixed, ordered set, the same words everywhere (Tasks list, task page, build page, Crew, Chat result card, Telegram/Slack card, `toolroll status`):
 
 | Headline | Means | Tone |
 |---|---|---|
