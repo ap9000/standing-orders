@@ -12,7 +12,10 @@ import { executeMateTool, type MateToolContext } from "./mate-tools.js";
 import { runLeadFollowPass } from "./lead-follow.js";
 import { leadContext } from "./lead-context.js";
 import { knowledgeView } from "./project-knowledge.js";
-import { getCommitment, openCommitments } from "./lead-commitments.js";
+import { getCommitment, openCommitments, promiseChannelOf } from "./lead-commitments.js";
+import { bridgePass, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, type TelegramTransport } from "./telegram.js";
+import { prepareSharedAction } from "./chat-actions.js";
+import { TELEGRAM_SKIPPED_OTHER_CHAT } from "./store.js";
 
 describe("the lead keeps its promises and remembers corrections", () => {
   let root: string, repo: string, store: Store, who: VerifiedApprover, session: number, thread: number;
@@ -37,14 +40,15 @@ describe("the lead keeps its promises and remembers corrections", () => {
   afterEach(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
 
   /** One lead turn: the tools run inside it, then it is answered (or fails) with its reply. */
-  function turn(now: Date, calls: (ctx: MateToolContext) => void, state: "answered" | "failed" = "answered") {
+  function turn(now: Date, calls: (ctx: MateToolContext) => void, state: "answered" | "failed" | "running" = "answered", channel?: MateToolContext["channel"]) {
     const opened = store.openMateTurn({ approver: who.name, session, thread, credentialKey: "fixture", reservedMicrousd: 0, dailyTurns: 100, weeklyCeilingMicrousd: 10_000_000, deadlineMs: 60_000 }, now);
     if (!opened.ok) throw Error(opened.reason);
     const started = store.startMateTurn(opened.id, now);
     if (!started.ok) throw Error("start");
-    const ctx: MateToolContext = { store, who, now, step: 1, readDecisions: new Map(), thread, turn: opened.id, evidenceRoot: root,
+    const ctx: MateToolContext = { store, who, now, step: 1, readDecisions: new Map(), thread, turn: opened.id, evidenceRoot: root, ...(channel === undefined ? {} : { channel }),
       draft: (kind, payload) => store.draftMateProposal({ thread, turn: opened.id, kind, payload, ceilingDigest: who.ceilingDigest }, now) };
     calls(ctx);
+    if (state === "running") return opened.id;
     store.finalizeMateTurn(opened.id, started.generation, state === "answered"
       ? { state, settledMicrousd: 0, tokensIn: 0, tokensOut: 0, message: { text: "I'll tell you.", activity: "" } }
       : { state, settledMicrousd: 0, tokensIn: 0, tokensOut: 0, failureReason: "provider-error" }, now);
@@ -107,11 +111,15 @@ describe("the lead keeps its promises and remembers corrections", () => {
     expect(said()).toHaveLength(1);
   });
 
-  test("c1: a promise from a reply that failed is dropped; the owner can cancel one (as Settings → Lead does); the lead can release one", async () => {
+  test("c1: a promise from a reply that was not delivered is dropped at once and never listed; the owner can cancel one (as Settings → Lead does); the lead can release one", async () => {
     turn(t0, ctx => { call(ctx, "commit_to", { what: "Tell you tomorrow", when: "time", at: at(60).toISOString() }); }, "failed");
+    // Settings (and the lead's catch-up) never list it, even before the follow pass looks.
+    expect(openCommitments(store, "operator")).toEqual([]);
+    // Dropped on the next pass, long before it was due to be looked at.
+    await pass(at(1));
+    expect(store.handle.prepare("SELECT state, outcome FROM lead_commitment").get()).toMatchObject({ state: "cancelled", outcome: "The reply that made this promise was not delivered." });
     await pass(at(61));
     expect(said()).toEqual([]);
-    expect(store.handle.prepare("SELECT state, outcome FROM lead_commitment").get()).toMatchObject({ state: "cancelled", outcome: "The reply that made this promise did not finish." });
 
     let ids: number[] = [];
     turn(at(70), ctx => {
@@ -159,7 +167,7 @@ describe("the lead keeps its promises and remembers corrections", () => {
   test("c2: a lasting preference becomes an instruction card added to the project's instructions, in the next bundle once confirmed", () => {
     let card = 0;
     turn(t0, ctx => {
-      card = Number(call(ctx, "remember", { repo: "r1", kind: "instruction", text: "Keep replies to two sentences." })["proposal"]);
+      card = Number(call(ctx, "remember", { repo: "r1", kind: "instruction", text: "Keep replies to two sentences.", revision: 0 })["proposal"]);
       expect(executeMateTool(ctx, "remember", { repo: "r1", kind: "decision", text: "No reason given" })).toMatchObject({ ok: false });
     });
     expect(store.getMateProposal(card)!.payload).toMatchObject({ operation: "knowledge_instructions" });
@@ -169,6 +177,95 @@ describe("the lead keeps its promises and remembers corrections", () => {
     expect(bundle.projects).toMatchObject([{ repo: "r1", instructions: "Keep replies to two sentences." }]);
     expect(bundle.corrections).toEqual([{ proposal: card, change: "Project instructions now end: Keep replies to two sentences." }]);
     // Saying it again adds nothing.
-    turn(at(3), ctx => { expect(executeMateTool(ctx, "remember", { repo: "r1", kind: "instruction", text: "Keep replies to two sentences." })).toMatchObject({ ok: false }); });
+    turn(at(3), ctx => { expect(executeMateTool(ctx, "remember", { repo: "r1", kind: "instruction", text: "Keep replies to two sentences.", revision: 1 })).toMatchObject({ ok: false, message: "The project's instructions already say this." }); });
+  });
+  test("c1: a promise made on Telegram is reported there as the lead's message, and a promise made on Slack is not sent to Telegram", async () => {
+    const code = mintPairingCode();
+    store.createTelegramPairing({ codeHash: hashPairingCode(code), approver: "operator", by: "operator", ttlMs: PAIRING_TTL_MS }, t0);
+    expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: "777000", chatId: "4242", userId: "31337", updateId: 1 }, t0).ok).toBe(true);
+    let phone = 0, slack = 0;
+    turn(at(1), ctx => { phone = Number(call(ctx, "commit_to", { what: "I'll ping you at noon", when: "time", at: at(30).toISOString() })["commitment"]); }, "answered", "telegram");
+    turn(at(2), ctx => { slack = Number(call(ctx, "commit_to", { what: "Remind you about the docs", when: "time", at: at(30).toISOString() })["commitment"]); }, "answered", "slack");
+    expect(getCommitment(store, phone)).toMatchObject({ channel: "telegram" });
+    expect(getCommitment(store, slack)).toMatchObject({ channel: "slack" });
+
+    await pass(at(31));
+    // The shared conversation keeps both lines; each chat gets its own promise as the lead's message to its owner.
+    expect(said()).toEqual(["It is time. (I said I would ping you at noon.)", "It is time. (I said I would remind you about the docs.)"]);
+    const notices = store.handle.prepare("SELECT dedupe_key, kind, recipient, body FROM notification WHERE dedupe_key LIKE 'lead-promise:%' ORDER BY id").all();
+    expect(notices).toEqual([
+      { dedupe_key: `lead-promise:telegram:${phone}`, kind: "lead-say", recipient: "operator", body: "It is time. (I said I would ping you at noon.)" },
+      { dedupe_key: `lead-promise:slack:${slack}`, kind: "lead-say", recipient: "operator", body: "It is time. (I said I would remind you about the docs.)" },
+    ]);
+    expect(notices.map(one => promiseChannelOf({ dedupeKey: String(one["dedupe_key"]) }))).toEqual(["telegram", "slack"]);
+
+    const calls: { method: string; params: Record<string, unknown> }[] = [];
+    let next = 100;
+    const transport: TelegramTransport = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "getUpdates") return { ok: true, result: [] };
+      if (method === "sendMessage" || method === "editMessageText") return { ok: true, result: { message_id: next++ } };
+      return { ok: true, result: true };
+    };
+    await bridgePass(store, { botId: "777000", transport, clock: () => at(32), readProjects: async () => [repo], conversation: { evidenceRoot: root, phoneOrigin: () => "https://console.example" } });
+    expect(calls.filter(one => one.method === "sendMessage" && String(one.params["chat_id"]) === "4242").map(one => one.params["text"]))
+      .toEqual(["Your lead\n\nIt is time. (I said I would ping you at noon.)"]);
+    expect(store.handle.prepare("SELECT d.receipt FROM notification_delivery d JOIN notification n ON n.id = d.notification WHERE n.dedupe_key = ?").get(`lead-promise:slack:${slack}`))
+      .toMatchObject({ receipt: TELEGRAM_SKIPPED_OTHER_CHAT });
+    // Reported once: a later pass sends nothing more.
+    await pass(at(40));
+    expect(store.handle.prepare("SELECT COUNT(*) AS n FROM notification WHERE dedupe_key LIKE 'lead-promise:%'").get()).toMatchObject({ n: 2 });
+  });
+
+  test("c1: a promise from a reply still being written is not listed until that reply is answered", async () => {
+    const running = turn(t0, ctx => { call(ctx, "commit_to", { what: "Tell you at one", when: "time", at: at(60).toISOString() }); }, "running");
+    expect(openCommitments(store, "operator")).toEqual([]);
+    await pass(at(1));
+    expect(store.handle.prepare("SELECT state FROM lead_commitment").get()).toMatchObject({ state: "open" });
+    const live = store.getMateTurn(running)!;
+    store.finalizeMateTurn(running, live.generation, { state: "answered", settledMicrousd: 0, tokensIn: 0, tokensOut: 0, message: { text: "I'll tell you at one.", activity: "" } }, at(2));
+    expect(openCommitments(store, "operator")).toMatchObject([{ what: "Tell you at one" }]);
+  });
+
+  test("c2: a confirmed correction stays in the bundle after a promise report or follow update; only the lead's next reply clears it", async () => {
+    let card = 0;
+    turn(t0, ctx => {
+      call(ctx, "commit_to", { what: "Tell you in five minutes", when: "time", at: at(5).toISOString() });
+      card = Number(call(ctx, "remember", { repo: "r1", kind: "decision", text: "Use quick checks on this project", why: "The operator said full checks are too slow here." })["proposal"]);
+    });
+    expect(confirmMateProposal(store, who, card, at(1), { via: "telegram", evidenceRoot: root })).toMatchObject({ ok: true });
+    // A turn-less line after the confirmation: a promise report, then a follow update.
+    await pass(at(6));
+    expect(said()).toHaveLength(1);
+    store.appendMateMessage({ thread, turn: null, role: "assistant", text: "Crew updates handled." }, at(7));
+    let bundle = JSON.parse(leadContext(store, who.repos, at(8), root, { owner: who.name, thread }));
+    expect(bundle.corrections).toEqual([{ proposal: card, change: expect.stringContaining("Use quick checks on this project") }]);
+    turn(at(9), () => {});
+    bundle = JSON.parse(leadContext(store, who.repos, at(10), root, { owner: who.name, thread }));
+    expect(bundle.corrections).toEqual([]);
+  });
+
+  test("c2: remember cards refuse a stale instruction revision and never duplicate a card still waiting", () => {
+    let first = 0;
+    turn(t0, ctx => {
+      // The lead read revision 0 (no instructions yet); omitting it or naming another is refused.
+      expect(executeMateTool(ctx, "remember", { repo: "r1", kind: "instruction", text: "Keep replies short." })).toMatchObject({ ok: false });
+      expect(executeMateTool(ctx, "remember", { repo: "r1", kind: "instruction", text: "Keep replies short.", revision: 3 })).toMatchObject({ ok: false, message: expect.stringContaining("changed since you read them") });
+      first = Number(call(ctx, "remember", { repo: "r1", kind: "instruction", text: "Keep replies short.", revision: 0 })["proposal"]);
+      // A second instruction card while the first waits would overwrite it: refused, as is the same decision twice.
+      expect(executeMateTool(ctx, "remember", { repo: "r1", kind: "instruction", text: "Use plain words.", revision: 0 })).toMatchObject({ ok: false, message: expect.stringContaining(`Card ${first}`) });
+      call(ctx, "remember", { repo: "r1", kind: "decision", text: "No full checks here", why: "Too slow for this project." });
+      expect(executeMateTool(ctx, "remember", { repo: "r1", kind: "decision", text: "no full checks here ", why: "Again." })).toMatchObject({ ok: false, message: expect.stringContaining("already proposes this decision") });
+    });
+    expect(store.listMateProposals(thread, ["pending"])).toHaveLength(2);
+    // The instructions change elsewhere (Knowledge, another card) before the waiting card is confirmed: it is refused, not applied over them.
+    const elsewhere = prepareSharedAction(store, who, "knowledge_instructions", { repo, instructions: "Edited on the Knowledge page." }, root, at(1));
+    turn(at(1), ctx => { expect(ctx.draft("action", { ...elsewhere })).not.toBeNull(); });
+    const other = store.listMateProposals(thread, ["pending"]).at(-1)!.id;
+    expect(confirmMateProposal(store, who, other, at(2), { via: "telegram", evidenceRoot: root })).toMatchObject({ ok: true });
+    expect(confirmMateProposal(store, who, first, at(3), { via: "telegram", evidenceRoot: root })).toMatchObject({ ok: false });
+    expect(knowledgeView(store, repo, who.name).knowledge.instructions).toBe("Edited on the Knowledge page.");
+    // Once it is no longer waiting, a fresh card against the current revision is accepted.
+    turn(at(4), ctx => { expect(executeMateTool(ctx, "remember", { repo: "r1", kind: "instruction", text: "Keep replies short.", revision: 1 })).toMatchObject({ ok: true }); });
   });
 });

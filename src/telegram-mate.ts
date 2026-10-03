@@ -715,7 +715,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
       store, who, session, thread, config, key: null, message: row.text, requestId: row.request,
       ...(row.context === null ? {} : { context: row.context }),
       ...(options.subscriptionRunner === undefined ? {} : { subscriptionRunner: options.subscriptionRunner }),
-      clock, evidenceRoot: options.evidenceRoot, revalidate, mediaDelivery: "documents",
+      clock, evidenceRoot: options.evidenceRoot, revalidate, mediaDelivery: "documents", channel: "telegram",
     });
   } finally {
     clearInterval(heartbeat);

@@ -1,9 +1,11 @@
 /** What the lead promised to follow up on. A commitment records the promise in the lead's words, the condition
  * that completes it, when to look next, where to report and when it lapses. The follow pass reads open ones
- * without a model and says one short line in the conversation when the condition is met; nothing otherwise.
+ * without a model and says one short line when the condition is met, on the channel the promise was made on;
+ * nothing otherwise.
  * The table is additive (no schema version bump), so a build that predates it still opens the store. */
-import type { Store } from './store.js';
+import type { Notification, Store } from './store.js';
 import { assignmentOf, type AssignmentSnapshot } from './assignment.js';
+import { LEAD_NAME, LEAD_SAY_KIND } from './lead-voice.js';
 
 /** The table: `LEAD_COMMITMENT_SCHEMA` in store.ts (additive, no version bump). */
 export const COMMITMENT_DAYS = 7;
@@ -16,7 +18,11 @@ export type TaskState = AssignmentSnapshot['state'];
 export const TASK_STATES: readonly TaskState[] = ['working', 'checking', 'needs-decision', 'ready-to-check', 'complete', 'cancelled'];
 export const RUN_OUTCOMES = ['finished', 'built', 'failed'] as const;
 export const CHECK_RESULTS = ['passed', 'failed', 'either'] as const;
-export const COMMITMENT_CHANNELS = ['chat'] as const;
+/** Where a promise was made, and so where it is reported: `chat` is the console or terminal conversation; a phone
+ * or team chat also gets the line as the lead's own message, on that chat only. */
+export const COMMITMENT_CHANNELS = ['chat', 'telegram', 'slack', 'discord', 'teams'] as const;
+export type CommitmentChannel = typeof COMMITMENT_CHANNELS[number];
+const PROMISE_KEY = 'lead-promise:';
 
 /** `afterRun`: only a result newer than the one there was when the promise was made counts. */
 export type CommitmentCondition =
@@ -84,7 +90,7 @@ export function recordCommitment(store: Store, input: CommitInput, now: Date): C
   const what = input.what.trim().replace(/\s+/g, ' ');
   if (what.length < 3 || what.length > 240) throw Error('Say what you promised in one short sentence.');
   const channel = input.channel ?? 'chat';
-  if (!(COMMITMENT_CHANNELS as readonly string[]).includes(channel)) throw Error('Report in this conversation (chat).');
+  if (!(COMMITMENT_CHANNELS as readonly string[]).includes(channel)) throw Error('Report on a chat this conversation uses.');
   if (readCondition(JSON.stringify(input.condition)) === null) throw Error('Choose a task, attempt, check or time to wait for.');
   const expiresAt = new Date(now.getTime() + COMMITMENT_DAYS * DAY_MS).toISOString();
   let checkAt = input.checkAt ?? now.toISOString();
@@ -103,10 +109,20 @@ export function getCommitment(store: Store, id: number): Commitment | null {
   return row === undefined ? null : readCommitment(row);
 }
 
-/** The owner's open promises, oldest first. */
+/** A promise only counts once the reply that made it was answered: one from a reply still being written, or one
+ * that never finished, was never heard. */
+const HEARD = "(c.turn IS NULL OR EXISTS (SELECT 1 FROM mate_turn t WHERE t.id = c.turn AND t.state = 'answered'))";
+
+/** The owner's open promises that they heard, oldest first. */
 export function openCommitments(store: Store, owner: string, limit = 20): Commitment[] {
-  return store.handle.prepare("SELECT * FROM lead_commitment WHERE owner = ? AND state = 'open' ORDER BY id LIMIT ?").all(owner, limit)
+  return store.handle.prepare(`SELECT c.* FROM lead_commitment c WHERE c.owner = ? AND c.state = 'open' AND ${HEARD} ORDER BY c.id LIMIT ?`).all(owner, limit)
     .map(readCommitment).filter((one): one is Commitment => one !== null);
+}
+
+/** The phone or team chat a lead message is for, when it is a met promise (`lead-promise:<channel>:<id>`); null for
+ * every other notification, which goes wherever it always went. */
+export function promiseChannelOf(row: Pick<Notification, 'dedupeKey'>): string | null {
+  return row.dedupeKey.startsWith(PROMISE_KEY) ? row.dedupeKey.slice(PROMISE_KEY.length).split(':')[0] ?? null : null;
 }
 
 /** Stop following up. Only the owner (from Settings or through their lead) cancels; a closed one stays as it was. */
@@ -161,6 +177,10 @@ export function checkLeadCommitments(store: Store, now: Date, root?: string): nu
   const at = now.toISOString();
   let reported = 0;
   store.handle.prepare("UPDATE lead_commitment SET state = 'expired', closed_at = ?, outcome = 'Expired after 7 days without the condition being met.' WHERE state = 'open' AND expires_at <= ?").run(at, at);
+  // A promise made in a reply that was not delivered (it failed, or its turn is gone) was never heard: drop it now,
+  // whenever it was next due, so nothing waits on it.
+  store.handle.prepare(`UPDATE lead_commitment SET state = 'cancelled', closed_at = ?, closed_by = 'lead', outcome = 'The reply that made this promise was not delivered.'
+    WHERE state = 'open' AND turn IS NOT NULL AND NOT EXISTS (SELECT 1 FROM mate_turn t WHERE t.id = lead_commitment.turn AND t.state IN ('queued', 'running', 'answered'))`).run(at);
   const due = store.handle.prepare("SELECT * FROM lead_commitment WHERE state = 'open' AND check_at <= ? ORDER BY check_at, id LIMIT ?").all(at, PASS_LIMIT);
   for (const row of due) {
     const one = readCommitment(row);
@@ -168,10 +188,9 @@ export function checkLeadCommitments(store: Store, now: Date, root?: string): nu
     const close = (state: 'done' | 'cancelled', outcome: string) =>
       Number(store.handle.prepare("UPDATE lead_commitment SET state = ?, closed_at = ?, closed_by = 'lead', outcome = ?, checked_at = ? WHERE id = ? AND state = 'open'").run(state, at, outcome, at, id).changes) === 1;
     if (one === null) { close('cancelled', 'Its condition could not be read.'); continue; }
-    // A promise made in a reply that never finished was never heard.
+    // A reply still being written may yet be delivered; one that was not is dropped above.
     const turn = one.turn === null ? null : store.getMateTurn(one.turn);
-    if (turn?.state === 'queued' || turn?.state === 'running') continue;
-    if (turn?.state === 'failed') { close('cancelled', 'The reply that made this promise did not finish.'); continue; }
+    if (turn !== null && turn.state !== 'answered') continue;
     const account = store.accountOf(one.owner);
     if (account === null || account.revokedAt !== null || one.repo !== null && !store.accountCanAccess(one.owner, one.repo)) { close('cancelled', 'Access to this project ended.'); continue; }
     const thread = store.getMateThread(one.thread);
@@ -182,9 +201,14 @@ export function checkLeadCommitments(store: Store, now: Date, root?: string): nu
       store.handle.prepare("UPDATE lead_commitment SET checked_at = ?, check_at = ? WHERE id = ? AND state = 'open'").run(at, new Date(now.getTime() + RECHECK_MS).toISOString(), id);
       continue;
     }
+    const line = `${seen} (I said I would ${promised(one.what)}.)`;
     store.transact(() => {
       if (!close('done', seen!)) return;
-      store.appendMateMessage({ thread: one.thread, turn: null, role: 'assistant', text: `${seen} (I said I would ${promised(one.what)}.)` }, now);
+      // The shared conversation always keeps the line; a promise made on a phone or team chat is also said there, as
+      // the lead's own message to its owner, on that chat alone (the usual delivery receipts apply).
+      store.appendMateMessage({ thread: one.thread, turn: null, role: 'assistant', text: line }, now);
+      if (one.channel !== 'chat') store.enqueueNotification({ dedupeKey: `${PROMISE_KEY}${one.channel}:${one.id}`, kind: LEAD_SAY_KIND, subject: LEAD_NAME,
+        body: line.slice(0, 300), recipient: one.owner, source: { installation: true } }, now);
       reported++;
     });
   }

@@ -14,6 +14,7 @@
  * (finding 11); usage that cannot be true is malformed, never a discount
  * (finding 8); and everything the model sees passed `mateView` (finding 9).
  */
+import type { CommitmentChannel } from "./lead-commitments.js";
 import { Buffer } from "node:buffer";
 import { mateToolLabel, type MateProgress } from "./mate-progress.js";
 import { createHash } from "node:crypto";
@@ -84,6 +85,8 @@ export type MateTurnInput = {
   evidenceRoot?: string;
   /** How this surface delivers the images a turn selects: Telegram sends them as documents after the reply; absent means identity only. */
   mediaDelivery?: "documents";
+  /** The chat this turn arrived on, where a promise it makes is reported (lead-commitments.ts); absent: the console or terminal. */
+  channel?: CommitmentChannel;
   /**
    * A channel's own standing, re-proved where the approver's is: before
    * admission, before every provider dispatch, after every provider wait,
@@ -474,7 +477,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
         if (changed !== null) return changed;
       }
       progress({ kind: "tool", turn: turnId, step: steps, label: mateToolLabel(call.name) });
-      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, thread: thread.id, turn: turnId, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
+      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, thread: thread.id, turn: turnId, ...(input.channel === undefined ? {} : { channel: input.channel }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back (its start), keys
       // blanked. Each line stays whole JSON so a run can assert on what a tool returned rather than on the model's words.

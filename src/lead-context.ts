@@ -10,7 +10,8 @@ const REMEMBERED = new Set(['decision_record', 'knowledge_instructions']);
  * since its last reply (with the cards still open in this conversation, which a correction may affect). */
 function followThrough(store: Store, owner: string, thread: number) {
   const commitments = openCommitments(store, owner, 10).map(one => ({ id: one.id, what: one.what.slice(0, 160), when: conditionWords(store, one.condition), expires: one.expiresAt }));
-  const last = store.handle.prepare("SELECT MAX(created_at) AS at FROM mate_message WHERE thread=? AND role='assistant'").get(thread)?.['at'];
+  // The lead's last reply is its last turn's; a turn-less line (a promise report, a follow update) is not a reply.
+  const last = store.handle.prepare("SELECT MAX(created_at) AS at FROM mate_message WHERE thread=? AND role='assistant' AND turn IS NOT NULL").get(thread)?.['at'];
   const corrections: { proposal: number; change: string }[] = [];
   for (const row of store.handle.prepare("SELECT id,payload_json FROM mate_proposal WHERE thread=? AND kind='action' AND state='confirmed' AND resolved_at>? ORDER BY id DESC LIMIT 20").all(thread, String(last ?? ''))) {
     try {

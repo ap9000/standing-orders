@@ -26380,6 +26380,10 @@ export class Store {
       this.db.prepare(`UPDATE notification_delivery SET receipt = '${TELEGRAM_SKIPPED_ELSEWHERE}'
         WHERE destination = ? AND delivered_at IS NULL AND receipt IS NULL
           AND notification IN (SELECT id FROM notification WHERE recipient IS NOT NULL AND recipient <> ?)`).run(destination, binding.approver);
+      // A promise the lead made on another chat is reported there (lead-commitments.ts), not here.
+      this.db.prepare(`UPDATE notification_delivery SET receipt = '${TELEGRAM_SKIPPED_OTHER_CHAT}'
+        WHERE destination = ? AND delivered_at IS NULL AND receipt IS NULL
+          AND notification IN (SELECT id FROM notification WHERE dedupe_key LIKE 'lead-promise:%' AND dedupe_key NOT LIKE 'lead-promise:telegram:%')`).run(destination);
       // Pings follow responsibility (the lead's work, this person's own act, a muted project): settled here, unsent.
       for (const raw of this.db.prepare(`SELECT n.* FROM notification n JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
           WHERE n.resolved_at IS NULL AND d.delivered_at IS NULL AND d.receipt IS NULL AND (d.claim_owner IS NULL OR d.claim_expires_at <= ?)`).all(destination, now.toISOString())) {
@@ -27447,6 +27451,8 @@ function readHold(row: Record<string, unknown>): Hold {
 export const TELEGRAM_SKIPPED_RECEIPT = "skipped:before-pairing";
 /** v83: a notification for another person, settled for this destination without sending. */
 export const TELEGRAM_SKIPPED_ELSEWHERE = "skipped:for-another-person";
+/** A met promise the lead made on another chat: reported there, settled here without sending. */
+export const TELEGRAM_SKIPPED_OTHER_CHAT = "skipped:for-another-chat";
 /** A fact this person is not messaged about: the lead's work, their own act, or a project they muted. */
 export const TELEGRAM_SKIPPED_QUIET = "skipped:quiet";
 
