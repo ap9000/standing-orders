@@ -1,6 +1,6 @@
 /** One vocabulary for a task's state: the same fixture tasks walk through the
- * Tasks list, the task page, the result page and Crew and read the same state
- * words; requirements, Project checks and PR CI read one source each; every
+ * Tasks list, the task page and the result page reading the same state words,
+ * and Crew reads each waiting task's list group; requirements, Project checks and PR CI read one source each; every
  * time goes through one formatter; each Review row says its own reason, one
  * verb opens a result, nothing else is called Details, and labels are sentence
  * case. Real HTTP against an ephemeral port over a seeded throwaway store. */
@@ -20,6 +20,10 @@ import { taskStatusOf, CHECKS_LABEL, PR_CI_LABEL, OPEN_RESULT, statusWhyHtml } f
 import { askChipOf, ASK_LABEL, resultHoldUpSentence } from "./needs-you.js";
 import { fullWhen, localizeTimes, shortWhen } from "./when-html.js";
 import type { BrowserWorkspace } from "./browser-workspace.js";
+import { MISMATCH_HEADLINE } from "./workspace-ui.js";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MismatchHeadline } from "./browser/views/result-view.js";
 
 const NOW = new Date("2026-10-02T12:00:00.000Z");
 const ago = (minutes: number) => new Date(NOW.getTime() - minutes * 60_000);
@@ -133,9 +137,7 @@ describe("one state per task, the same words on every surface (c1)", () => {
     };
     for (const [id, words] of Object.entries(expected)) {
       const row = rows.find(one => one.id === id)!;
-      const crew = workspace.crew.find(one => one.id === id)!;
       expect(row.status.label, `${id} list`).toBe(words);
-      expect(crew.label, `${id} Crew`).toBe(words);
       expect(await taskHeadline(id), `${id} task page`).toBe(words);
       if (id !== "agent-gave-up") {
         const result = await resultOf(id);
@@ -143,6 +145,35 @@ describe("one state per task, the same words on every surface (c1)", () => {
         expect(result.panel?.status?.headline ?? result.status.label, `${id} result card`).toBe(words);
       }
     }
+  });
+
+  test("Crew reads each waiting task's list group, so one group never shows two words", async () => {
+    const workspace = await tasksView();
+    const rows = (workspace.view as TasksView).rows;
+    const crew = Object.fromEntries(workspace.crew.map(one => [one.id, one.label]));
+    expect(crew).toEqual({ "search-typo-tolerance": "Review", "gift-card-hold": "Review", "coupon-plan-changed": "Review", "order-export-refuted": "Review", "agent-gave-up": "Unblock" });
+    for (const row of rows) expect(crew[row.id], row.id).toBe(row.ask === null ? row.status.label : ASK_LABEL[row.ask]);
+    // Within a group, one word: never "Ready for review" beside "Needs you".
+    const byGroup = new Map<string, Set<string>>();
+    for (const row of rows.filter(one => one.ask !== null)) byGroup.set(row.ask!, (byGroup.get(row.ask!) ?? new Set()).add(crew[row.id]!));
+    for (const [group, words] of byGroup) expect([...words], group).toEqual([ASK_LABEL[group as keyof typeof ASK_LABEL]]);
+  });
+
+  test("a report that doesn't match its changes is Mismatch; a plan changed after building is Plan changed", async () => {
+    const rows = ((await tasksView()).view as TasksView).rows;
+    const chip = (id: string) => rows.find(one => one.id === id)!.chip;
+    expect(chip("order-export-refuted")).toBe("Mismatch");
+    expect(chip("coupon-plan-changed")).toBe("Plan changed");
+    // The result page agrees: the refuted one's headline is the mismatch, the plan-changed one has none.
+    const refuted = await resultOf("order-export-refuted");
+    expect(refuted.mismatch?.headline).toBe(MISMATCH_HEADLINE);
+    const changed = await resultOf("coupon-plan-changed");
+    expect(changed.mismatch?.headline ?? null).toBeNull();
+    expect(await page(`/review?result=coupon-plan-changed&run=${runs["coupon-plan-changed"]}`)).not.toContain(MISMATCH_HEADLINE);
+    // The mismatch headline's dot is amber (a warning), never the quiet green of Ready for review.
+    const headline = renderToStaticMarkup(createElement(MismatchHeadline, { headline: MISMATCH_HEADLINE }));
+    expect(headline).toContain("bg-warning");
+    expect(headline).not.toMatch(/success/);
   });
 
   test("group headings stay; a row's chip is the specific ask, never its heading", async () => {
@@ -153,7 +184,7 @@ describe("one state per task, the same words on every surface (c1)", () => {
       expect(row.group).toBe(row.ask);
     }
     const chips = Object.fromEntries(view.rows.map(row => [row.id, row.chip]));
-    expect(chips).toEqual({ "search-typo-tolerance": "Result", "gift-card-hold": "Result", "coupon-plan-changed": "Mismatch", "order-export-refuted": "Result", "agent-gave-up": "Failed" });
+    expect(chips).toEqual({ "search-typo-tolerance": "Result", "gift-card-hold": "Result", "coupon-plan-changed": "Plan changed", "order-export-refuted": "Mismatch", "agent-gave-up": "Failed" });
     expect(askChipOf({ headline: "Needs you", need: "approval" })).toBe("Plan");
     expect(askChipOf({ headline: "Needs you", need: "start-builder" })).toBe("Builder offline");
     expect(askChipOf({ headline: "Needs you", need: "answer" })).toBeNull();

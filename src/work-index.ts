@@ -586,7 +586,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
     status: { token: `assignment-${assignmentState}`, label, detail, tone: workToneOf(shared.headline),
       action: primaryAction === null ? null : { label: actionLabel, kind: actionCode === 'open-result' ? 'open-result' : 'open-task' }, views, rank: n(row, 'rank') },
     ask: need ? ASKS[n(row, 'ask_rank')] ?? 'unblock' : null,
-    chip: need ? askChipOf({ headline: shared.headline, need: shared.need?.key ?? null, mismatch: planChanged, ask: ASKS[n(row, 'ask_rank')] ?? 'unblock' }) : null,
+    chip: need ? askChipOf({ headline: shared.headline, need: shared.need?.key ?? null, planChanged, mismatch: verdict === 'refuted' && n(row, 'proof_failed_check') !== 1, ask: ASKS[n(row, 'ask_rank')] ?? 'unblock' }) : null,
     primaryAction, completion: code === 'complete' ? { actor: String(row['checked_actor']), at: String(row['checked_at']), digest: String(row['checked_digest']) } : null,
     evidence: 'recorded' };
 }

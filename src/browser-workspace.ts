@@ -65,7 +65,7 @@ export type BrowserTasksView = {
     status: { label: string; tone: StatusTone; token: string };
     /** What a Needs you row asks: its group. */
     ask: Ask | null;
-    /** The row's chip under its group: the specific ask (Plan, Result, Mismatch, Failed, Builder offline), or none. */
+    /** The row's chip under its group: the specific ask (Plan, Result, Mismatch, Plan changed, Failed, Builder offline), or none. */
     chip: AskChip | null;
     group: BrowserTaskGroup;
     action: BrowserLink | null; detail: string | null; problem: string | null; notes: string[];

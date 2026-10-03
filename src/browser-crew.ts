@@ -2,6 +2,7 @@
 import type { BrowserCrewItem } from './browser-workspace.js';
 import type { WorkIndexItem, WorkIndexPage } from './work-index.js';
 import { chatControlHref, chatResultHref } from './chat-controls.js';
+import { ASK_LABEL } from './needs-you.js';
 
 /** The index is navigation only. Controls retain their exact owning task, run,
  * decision and approval ceremony; opening a result keeps its saved execution. */
@@ -29,7 +30,8 @@ export function browserWorkActionHref(item: WorkIndexItem): string | null {
   return `/t/${encodeURIComponent(item.rootId)}?version=${encodeURIComponent(taskId)}` + anchor;
 }
 
-/** Render an already-admitted page without repeating its database query. */
+/** Render an already-admitted page without repeating its database query. A task waiting on a person reads its
+ * Tasks list group (Decide, Review, Unblock), so one group never shows two words; every other task its headline. */
 export function browserCrewFromIndex(page: WorkIndexPage, conversationId?: string): { crew: BrowserCrewItem[]; crewTruncated: boolean } {
   const link = (href: string) => conversationId && href.startsWith('/chat?') ? href + '&conversation=' + encodeURIComponent(conversationId) : href;
   const rows = page.items.map(summary => {
@@ -41,7 +43,7 @@ export function browserCrewFromIndex(page: WorkIndexPage, conversationId?: strin
     const actionHref = browserWorkActionHref(summary);
     const item: BrowserCrewItem = {
       id: summary.rootId, title: summary.title, project: summary.repo,
-      state: summary.assignmentState, label: status.label, tone: status.tone, href: link(href), resultHref: resultHref === null ? null : link(resultHref),
+      state: summary.assignmentState, label: summary.ask === null ? status.label : ASK_LABEL[summary.ask], tone: status.tone, href: link(href), resultHref: resultHref === null ? null : link(resultHref),
       action: action === null || actionHref === null ? null : { label: action.label, href: link(actionHref) },
     };
     return { item, rank: status.rank };

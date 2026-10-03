@@ -23,6 +23,7 @@ import { installationStatus, renderInstallationStatus, taskWaitSnapshot } from "
 import { phoneStatus, phoneTask, phoneTaskChoices } from "./telegram-status.js";
 import { workIndexPage } from "./work-index.js";
 import { HEADLINES } from "./task-status.js";
+import { ASK_LABEL } from "./needs-you.js";
 import { assignmentTaskStatusOf } from "./assignment-presentation.js";
 import { taskWorkSummaryOf } from "./work-summary.js";
 import type { BrowserWorkspace } from "./browser-workspace.js";
@@ -164,10 +165,12 @@ describe("one headline on every surface", () => {
     expect(Object.fromEntries(view.rows.map(row => [row.id, row.status.label]))).toEqual(EXPECTED);
     for (const row of view.rows) expect(row.status.tone === "problem", row.id).toBe(row.status.label === "Failed");
     expect(view.tabs.map(tab => tab.label)).toEqual(["All", "Needs you", "Building", "Complete"]);
+    // Crew: a task waiting on a person reads its list group (Decide, Review, Unblock); every other task its headline.
     for (const item of workspace.crew) {
-      expect(HEADLINES, item.id).toContain(item.label);
-      expect(item.label).toBe(EXPECTED[item.id]);
-      expect(item.tone === "problem").toBe(item.label === "Failed");
+      const row = view.rows.find(one => one.id === item.id)!;
+      if (row.ask === null) expect(HEADLINES, item.id).toContain(item.label);
+      expect(item.label, item.id).toBe(row.ask === null ? EXPECTED[item.id] : ASK_LABEL[row.ask]);
+      expect(item.tone === "problem", item.id).toBe(EXPECTED[item.id] === "Failed");
     }
   });
 

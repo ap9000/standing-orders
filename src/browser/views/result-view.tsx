@@ -16,7 +16,7 @@ import {
 import { ACCEPT_NEEDS_REASON, type ResultActKind } from "../../result-acts.js";
 import { toneOf } from "./tone.js";
 import { threadWhen, whenTitle } from "./task-view.js";
-import { ConfirmStoppedForm, HEADLINE_DOT, RebuildForm, StatusDetails, StatusHeadline, statusWhyLines } from "./status-summary.js";
+import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, statusWhyLines } from "./status-summary.js";
 
 type Selected = NonNullable<BrowserResultView["selected"]>;
 
@@ -59,6 +59,13 @@ function ResultsMenu({ view }: { view: BrowserResultView }) {
   </DropdownMenu>;
 }
 
+/** A report that doesn't match its changes is a warning, never a quiet success: its dot is amber whatever the status tone. */
+export function MismatchHeadline({ headline }: { headline: string }) {
+  return <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug" data-mismatch-headline>
+    <span aria-hidden="true" className="size-2.5 shrink-0 rounded-full bg-warning" />{headline}
+  </h2>;
+}
+
 /** The status card: the headline, one sentence, the facts rows, then any caveat as one line of its own.
  * No acts here: the result's acts sit together in the decision row. */
 function StatusCard({ selected }: { selected: Selected }) {
@@ -86,9 +93,7 @@ function StatusCard({ selected }: { selected: Selected }) {
   return <Card data-result-status={selected.status.token} data-headline={status?.headline ?? selected.status.label} aria-label="Result status">
     <div className="min-w-0">
       {/* The blocking fact is the headline: the report doesn't match the changes. */}
-      {mismatch?.headline != null ? <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug" data-mismatch-headline>
-            <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", status === null ? DOT[tone] : HEADLINE_DOT[status.tone])} />{mismatch.headline}
-          </h2>
+      {mismatch?.headline != null ? <MismatchHeadline headline={mismatch.headline} />
         : status !== null ? <StatusHeadline status={status} />
         : <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
             <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{selected.status.label}
