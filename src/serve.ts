@@ -2265,14 +2265,19 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         if (error instanceof WorkIndexCursorError) return refuse(response, who, 400, 'This task page has expired. Open the first page.', '/work');
         throw error;
       }
-      // A failed row says what its latest attempt missed, as its task page does (a stop reason already reads so); a
-      // live build's row says which step it is on, or the step it is stuck on. Both from the database alone: a list
-      // reads no saved file per row (no check log, no plan), so a row names the step by number.
+      // A failed row says what its latest attempt missed, as its task page does (a stop reason already reads so), from
+      // the database alone: a row reads no check log. A live build's row says which step it is on, or the step it is
+      // stuck on, from that live attempt's own progress only, never a stopped attempt's; the step's words come from its
+      // current plan (one saved file, for live rows only), and without it the row names the step by number.
       work = { ...work, items: work.items.map((item): WorkIndexItem & { progress?: string } => {
         if (item.liveRunId !== null) {
           const ref = store.lookupRef(item.activeTaskId);
-          const recorded = ref === null ? null : store.latestCheckpointForTask(ref.id)?.snapshot.milestones ?? null;
-          const steps = buildProgressOf(recorded?.map(one => ({ description: null, state: one.state, note: one.note ?? null })));
+          const recorded = ref === null ? null : store.latestCheckpointForRun(item.liveRunId);
+          if (ref === null || recorded === null || recorded.taskRef !== ref.id) return item;
+          const plan = store.currentPlanRevision(ref.id);
+          const parsed = plan === null ? null : (() => { const doc = revisionDocOf(plan); return doc === null ? null : parseExecutionPlanDocument(doc.document); })();
+          const words = new Map(parsed?.ok === true ? milestonesOf(parsed.document).map(one => [one.id, one.description] as const) : []);
+          const steps = buildProgressOf(recorded.snapshot.milestones.map(one => ({ description: words.get(one.id) ?? null, state: one.state, note: one.note ?? null })));
           return steps === null ? item : { ...item, progress: steps.line };
         }
         if (item.state !== "failed") return item;
@@ -2623,16 +2628,28 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         return sendScreen(response, 409, screen("Result changed", '<h1>Result changed</h1><p>This acceptance link no longer matches the current result. Review the current task before accepting.</p><p class="refusal-back"><a class="button-link" href="/review">Review results</a></p>', { chrome: chromeFor(project, "runs") }));
       }
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
-      // Only a build that delivered nothing reads Failed here. A built (or no-change) result opens as a result, its own
-      // acts and all, Accept included where it may be accepted, whatever its task has done since.
-      if (selected !== null && attemptRow !== null && selected.run !== null && selected.run.outcome !== "built" && selected.run.outcome !== "no-change") {
+      // A build that delivered nothing reads Failed here, and so does a failed task's delivered result: what went wrong
+      // is the card and Retry the ink act. That result may still be accepted, but only in outline, as Accept anyway, with
+      // a reason.
+      const delivered = selected?.run?.outcome === "built" || selected?.run?.outcome === "no-change";
+      const failedTask = selected === null ? null : store.getTask(selected.taskId);
+      if (selected !== null && attemptRow !== null && selected.run !== null && (!delivered || failedTask?.state === "failed")) {
         const attemptRun = store.getRun(selected.run.id);
-        const task = store.getTask(selected.taskId);
-        const latest = attemptRun === null ? null : latestFinishedAttempt(store.runsFor(attemptRun.taskRef));
-        // Retry from here only when this is the failed task's latest attempt and nothing holds it.
-        const retry = task?.state === "failed" && latest?.id === selected.run.id && csrf !== "" && who.role === "approver" && store.currentLiveLease(attemptRun!.taskRef, now) === null
+        const runs = attemptRun === null ? [] : store.runsFor(attemptRun.taskRef);
+        const latest = latestFinishedAttempt(runs);
+        // Retry from here only when the task failed, nothing holds it, and this is its latest attempt or a result it delivered.
+        const retry = failedTask?.state === "failed" && (latest?.id === selected.run.id || delivered) && csrf !== "" && who.role === "approver" && store.currentLiveLease(attemptRun!.taskRef, now) === null
           ? { action: `${taskHref(selected.taskId)}/requeue` } : null;
-        if (attemptRun !== null) { const failure = explainAttempt(attemptRun, null); selected.failure = { ...failure, retry: retry === null ? null : { ...retry, note: retryNoteOf(failure.suggestion) } }; }
+        // Accept anyway: the same acceptance this task's latest result takes, never for an older one or one already accepted.
+        const family = delivered ? familyOf(selected.taskId) : null;
+        const acceptAnyway = delivered && csrf !== "" && family?.current.id === selected.taskId && family.problem === null &&
+          runs.find(runIsTaskResult)?.id === selected.run.id && store.proofAcceptance(selected.run.id) === null
+          ? { action: `${taskHref(selected.taskId)}/accept-proof`, run: selected.run.id } : null;
+        if (attemptRun !== null) {
+          // A delivered result didn't fail itself: the task's failure is its latest attempt's.
+          const failure = delivered ? failureOf(runs, null) : explainAttempt(attemptRun, null);
+          selected.failure = { ...failure, retry: retry === null ? null : { ...retry, note: retryNoteOf(failure.suggestion) }, ...(acceptAnyway === null ? {} : { acceptAnyway }) };
+        }
       }
       const reviewPage = reviewCockpitPage(chromeFor(wantedId === null ? project : chosenProject, "runs"), {
           queue: ranked,
@@ -10931,6 +10948,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           }
           note = validated.note;
         }
+        // A failed task's result is accepted only anyway, on purpose: with a reason.
+        if (note === null && store.getTask(taskId)?.state === "failed") return taskScreen(response, who, taskId, "Accepting anyway needs a reason.", 400);
         store.acceptProof(latest.id, verifiedAuthor(who.name), note, now);
         return redirect(response, body.get("return") === null ? taskHref(taskId) : safeReturn(body.get("return")));
       }
@@ -17206,13 +17225,14 @@ function checkProgressHtml(progress: CheckProgress | null, id = "check-progress"
   return `<p id="${id}" class="check-progress mono" data-check-progress data-final="${escape(state)}" role="status" aria-live="polite">${escape(progress.line)}</p>`;
 }
 
-function taskControlDetailsHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
-  const html = taskControlHtml(control, taskId, csrf, surface, inert);
+function taskControlDetailsHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false, stopElsewhere = false): string {
+  const html = taskControlHtml(control, taskId, csrf, surface, inert, stopElsewhere);
   return control.kind === "paused" || control.kind === "review-stopped" || control.kind === "stopping"
     ? `<details id="task-control-details"><summary>${control.kind === "paused" ? "Preserved work and resume" : "Stop details"}</summary>${html}</details>` : html;
 }
 
-function taskControlHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
+/** `stopElsewhere`: the Building card already carries this exact run's Stop, so the control card keeps only its details. */
+function taskControlHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false, stopElsewhere = false): string {
   if (control.kind === "none") return "";
   const back = `<input type="hidden" name="return" value="${surface}">`;
   const guarded = csrf !== "" && !inert;
@@ -17227,7 +17247,7 @@ function taskControlHtml(control: TaskControlView, taskId: string, csrf: string,
     return (
       `<section class="card task-control" id="task-control" data-task-control="stop" data-control-run="${control.run}" aria-label="stop this attempt">` +
       `<div class="task-control-copy"><details><summary>Stop details · ${escape(role(control))} #${control.run}</summary><p class="meta">Stopping ends only this attempt's own processes. Its branch, uncommitted work, evidence, and decisions stay preserved; other tasks keep running.</p></details></div>` +
-      (guarded
+      (stopElsewhere ? "" : guarded
         ? `<form method="post" action="${taskHref(taskId)}/stop" class="inline task-control-form task-stop-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${control.run}">${back}<button type="submit" class="danger task-control-button">Stop</button></form>`
         : `<button type="button" class="danger task-control-button" disabled>Stop</button>`) +
       `</section>`
@@ -22446,6 +22466,8 @@ function taskBodyParts(data: {
   // The Building card carries Stop for the build it describes (the same form), in place of a second card below it.
   const stop = building && data.control?.kind === "stop" && data.control.run === liveRun!.id && data.csrf !== ""
     ? { action: `${taskHref(task.id)}/stop`, run: data.control.run } : null;
+  // The Building card keeps its way to the build's own record (/r/<id>), whatever act it shows.
+  const record = building ? { label: `Build #${liveRun!.id} record`, href: `/r/${liveRun!.id}` } : null;
   const earlier = earlierStopped.length === 0 ? null : {
     summary: earlierAttemptsWords(earlierStopped.length),
     attempts: [...earlierStopped].sort((a, b) => a.id - b.id).map(run => ({ label: `${runNoun(run)[0]!.toUpperCase()}${runNoun(run).slice(1)} #${run.id}`, href: `/r/${run.id}`,
@@ -22463,7 +22485,7 @@ function taskBodyParts(data: {
     ],
     version: data.versionLabel == null ? null : { label: data.versionLabel, current: { label: "Current work", href: taskHref(data.rootId ?? task.id) } },
     status: statusCard === null ? null : inPlaceChecks(failedCard ? { ...statusCard, action: null, status: { ...statusCard.status, sentence: data.failure?.line ?? statusCard.status.sentence } }
-      : progress !== null ? { ...statusCard, status: { ...statusCard.status, sentence: progress.line } }
+      : progress !== null || record !== null ? { ...statusCard, action: statusCard.action?.href === record?.href ? null : statusCard.action, status: { ...statusCard.status, sentence: progress?.line ?? statusCard.status.sentence } }
       : statusCard.action !== null && rebuild === null && bareSelfLink(statusCard.action.href) ? { ...statusCard, action: null } : statusCard),
     statusHtml,
     failure: failedCard && data.failure != null ? { line: data.failure.line, evidence: data.failure.evidence, suggestion: data.failure.suggestion, link: data.failure.link } : null,
@@ -22471,6 +22493,7 @@ function taskBodyParts(data: {
     runChecks,
     progress,
     stop,
+    record,
     earlier,
     approval: approvalHtml,
     confirmStopped: data.csrf !== "" && data.assignment?.primaryAction?.code === "confirm-stopped" && data.assignment.primaryAction.target.runId !== null
@@ -22478,7 +22501,7 @@ function taskBodyParts(data: {
     rebuild,
     // The plan, progress and plan changes are thread entries now; the rest still needs a person here.
     lead: [
-      { key: "history", html: data.history ?? "" }, { key: "control", html: stop === null ? controlHtml : "" }, { key: "problem", html: problemHtml },
+      { key: "history", html: data.history ?? "" }, { key: "control", html: stop === null ? controlHtml : taskControlDetailsHtml(data.control!, task.id, data.csrf, "task", false, true) }, { key: "problem", html: problemHtml },
       { key: "pull-request", html: pullRequestCard },
       { key: "needs-scope", html: needsScopeCard },
       { key: "mirror", html: mirrorCard }, { key: "contest", html: contestCard }, { key: "attempt", html: attemptPanel },
@@ -22805,7 +22828,7 @@ type ReviewCockpitView = {
   /** The demo database: no check runs here, and the Checks row says so. */
   demo?: boolean;
   /** A build that didn't deliver a result: what it missed, the suggestion, and Retry when the task can be retried here. */
-  failure?: (FailureExplanation & { retry: { action: string; note: string } | null }) | null;
+  failure?: (FailureExplanation & { retry: { action: string; note: string } | null; acceptAnyway?: { action: string; run: number } | null }) | null;
 };
 
 /** The one result page's address: the task and its run, never a project path
@@ -23165,8 +23188,9 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   const nextKind = selected.next?.kind;
   // A failed build: what went wrong is the card, Retry the act; a link to this same page goes nowhere, so it isn't one.
   const failure = view.failure == null ? null : { line: view.failure.line, evidence: view.failure.evidence, suggestion: view.failure.suggestion, retry: view.failure.retry,
-    link: view.failure.link === null || (view.failure.link.href.startsWith(`${here}&run=${run.id}`) && !view.failure.link.href.includes("#")) ? null : view.failure.link };
-  const acts = failure !== null ? resultActsOf({ accept: null, runChecks: runChecks !== null, checksRunning, blocked: null, canRequest: false, need: null, next: null, failed: { retry: failure.retry !== null } })
+    link: view.failure.link === null || (view.failure.link.href.startsWith(`${here}&run=${run.id}`) && !view.failure.link.href.includes("#")) ? null : view.failure.link,
+    ...(view.failure.acceptAnyway == null ? {} : { acceptAnyway: { ...view.failure.acceptAnyway, returnTo: `${here}&run=${run.id}` } }) };
+  const acts = failure !== null ? resultActsOf({ accept: null, runChecks: runChecks !== null, checksRunning, blocked: null, canRequest: false, need: null, next: null, failed: { retry: failure.retry !== null, acceptAnyway: failure.acceptAnyway !== undefined } })
     : resultActsOf({
     accept: decision === null ? null : { ready: decision.ready },
     runChecks: runChecks !== null,

@@ -78,7 +78,8 @@ function StopForm({ stop, csrf }: { stop: NonNullable<BrowserTaskView["stop"]>; 
  * half strength, its border; its sentence is what it missed, the evidence
  * one line under it, and Retry's note starts with what to change. A live
  * build says the step it is on; a stuck step takes that line's place, with
- * its act beside it, and Stop sits in the same card; the attempts that
+ * its act beside it, its record is one quiet link under it, and Stop sits
+ * in the same card; the attempts that
  * stopped before it are one quiet line at the bottom. */
 function StatusCard({ view, card, csrf }: { view: BrowserTaskView; card: AssignmentCard; csrf: string }) {
   const failed = card.status.headline === "Failed";
@@ -95,6 +96,9 @@ function StatusCard({ view, card, csrf }: { view: BrowserTaskView; card: Assignm
           {stuck !== null && <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />}
           <span className="[overflow-wrap:anywhere]">{card.status.sentence}</span>
         </p>
+        {view.record != null && <p className="mt-1 text-[13px]">
+          <a href={view.record.href} data-build-record className="text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-muted-foreground phone:inline-flex phone:min-h-11 phone:items-center">{view.record.label}</a>
+        </p>}
         {failed && failure != null && <FailureEvidence failure={failure} />}
         {failed && failure != null && !retrying && <p className="mt-1 text-[13px] text-muted-foreground" data-failure-suggestion>What to change: {failure.suggestion}</p>}
       </div>

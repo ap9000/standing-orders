@@ -1218,7 +1218,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after.acts.primary).not.toBe("retry");
   });
 
-  test("a failed task's delivered result is still a result: it opens as one, never as the failed build's page", async () => {
+  test("a failed task's delivered result reads Failed: Retry is the ink act, and Accept anyway, in outline, takes a reason", async () => {
     const patch = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n";
     const run = build("t-builtfail", seed("t-builtfail", "Built, then the task failed"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], verdict: { verdict: "verified" } });
     store.setTaskState("t-builtfail", "failed", T0);
@@ -1226,13 +1226,45 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const cookie = await login();
     const page = `/review?result=t-builtfail&run=${run}`;
     expect((await fetch(url(`/r/${run}`), { headers: { cookie }, redirect: "manual" })).headers.get("location")).toBe(page);
-    const selected = (((await (await fetch(url(`${page}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView).selected!;
-    // Its own reading and acts, as any result: not the failed build's Failed card with Retry in place of them.
-    expect(selected.failure ?? null).toBeNull();
-    expect(selected.status.label).not.toBe("Failed");
-    expect(selected.panel!.status!.headline).not.toBe("Failed");
-    expect(selected.acts.primary).not.toBe("retry");
-    expect([selected.acts.primary, selected.acts.secondary]).toContain("request-changes");
+    const read = async () => ((await (await fetch(url(`${page}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const selected = (await read()).selected!;
+    // The Failed reading, with what went wrong as its sentence and Retry's note holding what to change.
+    expect(selected.status.label).toBe("Failed");
+    expect(selected.panel!.status).toMatchObject({ headline: "Failed", sentence: selected.failure!.line });
+    expect(selected.failure!.line).not.toBe("");
+    expect(selected.failure!.retry).toEqual({ action: "/t/t-builtfail/requeue", note: selected.failure!.suggestion });
+    // Retry is the ink act; Accept is only the outline Accept anyway, posting this exact result with a reason.
+    expect(selected.acts).toEqual({ primary: "retry", secondary: "accept-anyway", line: null });
+    expect(selected.decision).toBeNull();
+    expect(selected.complete).toBeNull();
+    expect(selected.failure!.acceptAnyway).toEqual({ action: "/t/t-builtfail/accept-proof", run, returnTo: page });
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { ResultView } = await import("./browser/views/result-view.js");
+    // The page renders in a browser: it reads its own origin.
+    const shown = await read();
+    const global = globalThis as { window?: unknown };
+    global.window = { location: { origin: "http://127.0.0.1" } };
+    const rendered = (() => { try { return renderToStaticMarkup(createElement(ResultView, { view: shown, csrf: "token" })); } finally { delete global.window; } })();
+    const decision = rendered.split("data-result-decision=")[1]!.split("</section>")[0]!;
+    expect(decision.startsWith(`"retry"`)).toBe(true);
+    expect(decision).toMatch(/<form data-retry="true"[^>]*action="\/t\/t-builtfail\/requeue"/);
+    expect(decision.indexOf("data-retry")).toBeLessThan(decision.indexOf("data-accept-anyway"));
+    const anyway = decision.split("data-accept-anyway")[1]!.split("</form>")[0]!;
+    expect(anyway).toContain("Accepting needs a reason");
+    expect(anyway).toMatch(/<input(?=[^>]*\bname="note")(?=[^>]*\brequired)[^>]*>/);
+    expect(anyway).toMatch(/data-act="accept-anyway"[^>]*>.*Accept anyway<\/button>/);
+    expect(anyway).not.toContain("data-ink-act");
+    // Without a reason it is refused; with one it is accepted and the page comes back without the act.
+    const csrf = csrfOf(await (await fetch(url("/t/t-builtfail"), { headers: { cookie } })).text());
+    expect((await post(cookie, "/t/t-builtfail/accept-proof", { csrf, run: String(run), return: page })).status).toBe(400);
+    expect(store.proofAcceptance(run)).toBeNull();
+    const accepted = await post(cookie, "/t/t-builtfail/accept-proof", { csrf, run: String(run), return: page, note: "The flag stays for one release on purpose." });
+    expect(accepted.status).toBe(303);
+    expect(store.proofAcceptance(run)).toMatchObject({ note: "The flag stays for one release on purpose." });
+    const after = (await read()).selected!;
+    expect(after.failure!.acceptAnyway ?? null).toBeNull();
+    expect(after.acts.secondary).not.toBe("accept-anyway");
   });
 
   test("a missing or unreadable proof reads Accept without checks, and Accept never posts publish", async () => {

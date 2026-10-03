@@ -15,6 +15,9 @@ describe("the result page's one ink act", () => {
     // Nothing to retry from here (already retried, or a viewer): Run checks alone, or nothing.
     expect(resultActsOf({ ...failed, failed: { retry: false }, runChecks: true })).toEqual({ primary: "run-checks", secondary: null, line: null });
     expect(resultActsOf({ ...failed, failed: { retry: false } })).toEqual({ primary: null, secondary: null, line: null });
+    // A failed task's delivered result: Accept anyway, only ever in outline, takes the outline place from Run checks.
+    expect(resultActsOf({ ...failed, failed: { retry: true, acceptAnyway: true }, runChecks: true })).toEqual({ primary: "retry", secondary: "accept-anyway", line: null });
+    expect(resultActsOf({ ...failed, failed: { retry: false, acceptAnyway: true } })).toEqual({ primary: null, secondary: "accept-anyway", line: null });
   });
 
   it("everything met: Accept, with Request changes beside it", () => {

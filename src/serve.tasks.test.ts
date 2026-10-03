@@ -2650,11 +2650,19 @@ describe("failures say what failed and builds say how far along: the demo's own 
       action: { label: "Send the agent a note", href: "#steering" } } });
     // The act lands somewhere real: the Steering fold with its note form.
     expect(building.manage.some(one => one.id === "steering")).toBe(true);
-    // Stop is in that card, for this exact build; no second Stop card, and no panel saying the live file view is off.
+    // Stop is in that card, for this exact build; the control card below keeps its details but not a second Stop, and
+    // no panel says the live file view is off.
     const live = runsOf("harden-webhook-retries").find(one => one.outcome === null && one.role === "builder")!;
     expect(building.stop).toEqual({ action: "/t/harden-webhook-retries/stop", run: live.id });
-    expect(building.lead.some(one => one.key === "control" || one.key === "attempt")).toBe(false);
+    const control = building.lead.find(one => one.key === "control")!.html;
+    expect(control).toContain(`data-control-run="${live.id}"`);
+    expect(control).toContain(`Stop details · build #${live.id}`);
+    expect(control).not.toContain("task-stop-form");
+    expect(control).not.toContain(">Stop</button>");
+    expect(building.lead.some(one => one.key === "attempt")).toBe(false);
     expect(renderedHtmlOf(html)).not.toContain("the live file view is off");
+    // The card keeps its way to the build's own record.
+    expect(building.record).toEqual({ label: `Build #${live.id} record`, href: `/r/${live.id}` });
     // Rendered, the card holds the stuck line, its note act and the exact-run Stop form, side by side.
     const { renderToStaticMarkup } = await import("react-dom/server");
     const { createElement } = await import("react");
@@ -2665,6 +2673,9 @@ describe("failures say what failed and builds say how far along: the demo's own 
     expect(card).toContain("data-stuck-action");
     expect(card).toMatch(new RegExp(`<form class="task-stop-form[^"]*" data-task-control="stop" data-control-run="${live.id}" action="/t/harden-webhook-retries/stop" method="post">`));
     expect(card).toContain(`<input type="hidden" name="run" value="${live.id}"/>`);
+    expect(card).toContain(`<input type="hidden" name="return" value="task"/>`);
+    expect(card).toMatch(new RegExp(`<a href="/r/${live.id}" data-build-record[^>]*>Build #${live.id} record</a>`));
+    expect(card.match(/>Stop<\/button>/g)).toHaveLength(1);
     const stopped = runsOf("harden-webhook-retries").find(one => one.role === "builder" && one.outcome === "refused")!;
     expect(building.earlier).toEqual({ summary: "1 earlier attempt stopped", attempts: [{ label: `Build #${stopped.id}`, href: `/r/${stopped.id}`, text: "The plan changed, so a fresh attempt took over." }] });
     // Not a red mark in the thread beside the healthy build.
@@ -2684,11 +2695,28 @@ describe("failures say what failed and builds say how far along: the demo's own 
     expect(asking.thread!.some(one => one.key === `run-${stopped.id}`)).toBe(true);
   });
 
-  test("the Tasks list says the same from the database alone: no saved file is read for a row", async () => {
-    // Every saved file gone: a row still names the stuck step and the missed requirement.
+  test("the Tasks list says the same: a failed row from the database alone, a live row from its own attempt's progress", async () => {
+    const rowsOf = async () => (workspaceOf(await (await fetch(`${base}/work`, { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTasksView).rows;
+    const ref = made.store.lookupRef("harden-webhook-retries")!;
+    const live = runsOf("harden-webhook-retries").find(one => one.outcome === null && one.role === "builder")!;
+    const stopped = runsOf("harden-webhook-retries").find(one => one.role === "builder" && one.outcome === "refused")!;
+    const recorded = made.store.latestCheckpointForRun(live.id)!;
+    const at = (states: ("pending" | "current" | "completed" | "blocked")[]) => ({ revisionHash: recorded.snapshot.revisionHash,
+      milestones: recorded.snapshot.milestones.map((one, index) => ({ id: one.id, state: states[index]!, note: null })) });
+    // Moving on, the live build names its step in the plan's own words.
+    made.store.insertRunCheckpoint({ run: live.id, taskRef: ref.id, planRevision: recorded.planRevision, snapshot: at(["completed", "current", "pending", "pending", "pending", "pending"]) }, new Date());
+    // A stopped attempt's later progress is never read as the live build's.
+    made.store.insertRunCheckpoint({ run: stopped.id, taskRef: ref.id, planRevision: recorded.planRevision, snapshot: at(["completed", "completed", "completed", "completed", "current", "pending"]) }, new Date(Date.now() + 1000));
+    expect((await rowsOf()).find(row => row.id === "harden-webhook-retries")?.detail).toBe("Step 2 of 6: Add a per-endpoint token-bucket limiter.");
+    // Every saved file gone: the live row names its step by number, and the failed row still names the missed requirement.
     rmSync(made.evidenceRoot, { recursive: true, force: true });
+    const rows = await rowsOf();
+    expect(rows.find(row => row.id === "harden-webhook-retries")?.detail).toBe("Step 2 of 6.");
+    expect(rows.find(row => row.id === "retire-legacy-flag")?.detail).toBe("Missed a requirement: No reference to LEGACY_PAYOUT remains in the codebase.");
+  });
+
+  test("the Tasks list row of a stuck live build names the stuck step from that build's own progress", async () => {
     const rows = (workspaceOf(await (await fetch(`${base}/work`, { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTasksView).rows;
     expect(rows.find(row => row.id === "harden-webhook-retries")?.detail).toBe("Stuck on step 4 of 6: the flag is off in the staging deploy target — confirming before enforcing.");
-    expect(rows.find(row => row.id === "retire-legacy-flag")?.detail).toBe("Missed a requirement: No reference to LEGACY_PAYOUT remains in the codebase.");
   });
 });

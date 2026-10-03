@@ -219,7 +219,7 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
   const shown = [acts.primary, acts.secondary].filter((one): one is ResultActKind => one !== null);
   const why = shown.includes("accept") ? decision?.why ?? null : null;
   // "Accepting needs a reason" labels the reason field when that field is here; it isn't said twice.
-  const reasonHere = shown.includes("accept") && complete === null && accept?.note != null;
+  const reasonHere = shown.includes("accept") && complete === null && accept?.note != null || shown.includes("accept-anyway");
   const line = acts.line === ACCEPT_NEEDS_REASON && reasonHere ? null : acts.line ?? why;
   const act = (kind: ResultActKind, ink: boolean): ReactNode => {
     const variant = ink ? "attention" as const : "outline" as const;
@@ -252,6 +252,19 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
           <input type="hidden" name="return" value={accept.returnTo} />
           <Button type="submit" variant={variant} className={wide} {...mark} data-accept-result><Check className="phone:hidden" />{decision.label}</Button>
         </form>;
+      case "accept-anyway": {
+        // A failed task's result: accepted only on purpose, so the reason field is required and sits right above it.
+        const anyway = selected.failure?.acceptAnyway ?? null;
+        if (anyway == null) return null;
+        return <form key={kind} method="post" action={anyway.action} className="flex w-full max-w-sm flex-col items-start gap-2 phone:max-w-none" data-accept-with-reason data-accept-anyway>
+          <input type="hidden" name="csrf" value={csrf} />
+          <input type="hidden" name="run" value={String(anyway.run)} />
+          <input type="hidden" name="return" value={anyway.returnTo} />
+          <label htmlFor="accept-reason" className="text-[13px] font-medium" data-accept-needs-reason>{ACCEPT_NEEDS_REASON}</label>
+          <Input id="accept-reason" type="text" name="note" maxLength={500} required placeholder="Why is this safe to accept?" className="h-11 w-full" />
+          <Button type="submit" variant="outline" className={wide} {...mark} data-accept-result><Check className="phone:hidden" />Accept anyway</Button>
+        </form>;
+      }
       case "checks-running":
         return <Button key={kind} type="button" variant={variant} disabled aria-disabled="true" className={wide} {...mark}>Checks running</Button>;
       case "run-checks":

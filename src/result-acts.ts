@@ -13,6 +13,8 @@
  *   saved notes or a failing PR         → Revise / Draft a repair task
  *   a failed build                      → Retry (its note starts with what to change), then Run checks when they
  *                                         didn't run; never Accept: a failed build is not a result to accept
+ *   a failed task's delivered result    → Retry, then Accept anyway (in outline, with a reason) where it may be
+ *                                         accepted; Run checks stays in its Checks row
  *
  * Accepting means what it always meant: the same forms post to the same
  * endpoints. This only decides which one is ink. */
@@ -20,7 +22,7 @@
 /** The words over the reason field an Accept of a refuted result requires. */
 export const ACCEPT_NEEDS_REASON = "Accepting needs a reason";
 
-export type ResultActKind = "retry" | "accept" | "checks-running" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
+export type ResultActKind = "retry" | "accept" | "accept-anyway" | "checks-running" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
 
 export type ResultActFacts = {
   /** An Accept this page can post (Mark complete, or the person's acceptance); `ready`: every requirement met and checks passed. */
@@ -37,8 +39,9 @@ export type ResultActFacts = {
   need: "rebuild" | "confirm-stopped" | null;
   /** Saved notes ready to become a revision, or a failing pull request's repair. */
   next: "revise" | "draft-repair" | null;
-  /** A failed build: `retry` when the task can be retried from here. */
-  failed?: { retry: boolean } | null;
+  /** A failed build: `retry` when the task can be retried from here; `acceptAnyway` when it delivered a result that
+   * may still be accepted, with a reason. */
+  failed?: { retry: boolean; acceptAnyway?: boolean } | null;
 };
 
 export type ResultActs = {
@@ -55,7 +58,8 @@ export function resultActsOf(facts: ResultActFacts): ResultActs {
   const accept = facts.accept === null ? null : "accept" as const;
   if (facts.failed != null) {
     const checks = facts.runChecks && !facts.checksRunning ? "run-checks" as const : facts.checksRunning ? "checks-running" as const : null;
-    return facts.failed.retry ? { primary: "retry", secondary: checks, line: null } : { primary: checks, secondary: null, line: null };
+    const anyway = facts.failed.acceptAnyway === true ? "accept-anyway" as const : null;
+    return facts.failed.retry ? { primary: "retry", secondary: anyway ?? checks, line: null } : { primary: checks, secondary: anyway, line: null };
   }
   if (facts.need !== null) return { primary: facts.need, secondary: request, line: null };
   if (facts.next !== null) return { primary: facts.next, secondary: accept ?? request, line: null };

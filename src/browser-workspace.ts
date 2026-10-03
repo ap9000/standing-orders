@@ -170,6 +170,8 @@ export type BrowserTaskView = {
   progress?: { line: string; stuck: { step: number; why: string | null; line: string; action: BrowserLink | null } | null } | null;
   /** Stop, on the Building card: the exact live build's stop form (posts its run id). */
   stop?: { action: string; run: number } | null;
+  /** The Building card's link to the live build's own record ("Build #N record", /r/<id>). */
+  record?: BrowserLink | null;
   earlier?: { summary: string; attempts: { label: string; href: string; text: string | null }[] } | null;
   /** Server cards that may need a person now (stop/resume, scope prompt, plan, live attempt). */
   lead: { key: string; html: string }[];
@@ -289,7 +291,9 @@ export type BrowserResultView = {
     runChecks: BrowserRunChecks | null;
     /** A failed build's result: what it missed and the suggestion Retry's note starts with; Retry itself when the task
      * can be retried from here. Null for every other result. */
-    failure?: (BrowserFailure & { retry: { action: string; note: string } | null }) | null;
+    failure?: (BrowserFailure & { retry: { action: string; note: string } | null;
+      /** A failed task's delivered result, accepted only in outline with a reason (the task's accept-proof). */
+      acceptAnyway?: { action: string; run: number; returnTo: string } | null }) | null;
     /** The raw run record, under Details: its facts and the full record. */
     record: { build: number; href: string; facts: { label: string; value: string }[] } | null;
     /** The signed scope; null when none was filed. */
