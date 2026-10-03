@@ -37,6 +37,8 @@ function scriptedTelegram() {
   const calls: Call[] = [];
   const updates: unknown[][] = [];
   let next = 100;
+  /** Telegram refuses the next edit in a chat, with these words. */
+  const editFailures: Array<{ chat: number; description: string }> = [];
   const transport: TelegramTransport = async (method, params) => {
     if (method === "getUpdates") {
       calls.push({ method, params, messageId: null });
@@ -47,6 +49,11 @@ function scriptedTelegram() {
       const messageId = next++;
       calls.push({ method, params, messageId });
       return { ok: true, result: { message_id: messageId } };
+    }
+    const refusal = method === "editMessageText" ? editFailures.findIndex(one => String(one.chat) === String(params["chat_id"])) : -1;
+    if (refusal >= 0) {
+      calls.push({ method: "editMessageText (refused)", params, messageId: null });
+      return { ok: false, description: editFailures.splice(refusal, 1)[0]!.description };
     }
     calls.push({ method, params, messageId: method === "editMessageText" ? Number(params["message_id"]) : null });
     if (method === "editMessageText") return { ok: true, result: { message_id: params["message_id"] } };
@@ -72,7 +79,7 @@ function scriptedTelegram() {
     return { messageId, text: String(last.params["text"]), rows, token, labels: rows.map(one => one.url === undefined ? one.text : `${one.text} ↗`) };
   };
   const acks = () => calls.filter(call => call.method === "answerCallbackQuery").map(call => String(call.params["text"] ?? ""));
-  return { transport, calls, updates, inChat, cardWith, current, acks, buttons };
+  return { transport, calls, updates, inChat, cardWith, current, acks, buttons, editFailures };
 }
 
 describe("decisions finish in the chat app", () => {
@@ -83,6 +90,7 @@ describe("decisions finish in the chat app", () => {
   let script: ReturnType<typeof scriptedTelegram>;
   let nextUpdate = 10;
   const merges: Array<{ runId: number; by: string }> = [];
+  let mergeAnswer: { ok: true } | { ok: false; message: string } = { ok: true };
 
   const pairAs = (who: string, chat: number, updateId: number) => {
     const code = mintPairingCode();
@@ -90,7 +98,7 @@ describe("decisions finish in the chat app", () => {
     expect(store.consumeTelegramPairing({ codeHash: hashPairingCode(code), botId: BOT, chatId: String(chat), userId: String(chat), updateId }, now).ok).toBe(true);
   };
   const pass = () => bridgePass(store, { botId: BOT, transport: script.transport, clock: () => now, readProjects: async () => [REPO],
-    conversation: { evidenceRoot: dir, phoneOrigin: () => ORIGIN, merge: async input => { merges.push(input); return { ok: true }; } } });
+    conversation: { evidenceRoot: dir, phoneOrigin: () => ORIGIN, merge: async input => { merges.push(input); return mergeAnswer; } } });
   const tapIn = async (chat: number, data: string, messageId: number, text = script.current(chat, messageId).text) => {
     script.updates.push([{ update_id: nextUpdate++, callback_query: { id: `cb-${nextUpdate}`, data, from: { id: chat }, message: { message_id: messageId, chat: { id: chat }, text } } }]);
     return pass();
@@ -146,6 +154,18 @@ describe("decisions finish in the chat app", () => {
     store.signMode({ repo: REPO, name: terms.name, termsJson: modeTermsJson(terms), digest: modeDigestOf(terms), signedBy: by, absoluteExpiry: terms.absoluteExpiry, publication: terms.publication }, now);
     return terms;
   };
+  /** A ready result with an open pull request at its commit, and a way to push "Ready to merge". */
+  const readyPullRequest = (id: string) => {
+    const { ref, run } = readyResult(id, "Keep the guard readable");
+    const head = "a".repeat(40);
+    const publication = store.createPublicationIntent({ run, taskRef: ref, githubRepo: "o/r", remote: "origin", base: "main", head: `so/${id}`, headSha: head, bodyHash: "h", draft: false }, now);
+    store.handle.prepare("UPDATE publication SET state = 'opened', pr_number = 3 WHERE id = ?").run(publication);
+    store.handle.prepare("INSERT INTO pull_request_follow (publication, ready_head, created_at, updated_at) VALUES (?, ?, ?, ?)").run(publication, head, now.toISOString(), now.toISOString());
+    const ready = () => store.enqueueNotification({ dedupeKey: `pull-request:${publication}:ready:${head}:${now.getTime()}`, kind: "pull-request-ready", pushClass: "merge",
+      subject: `Ready to merge: ${id} (PR #3)`, body: `Checks passed on ${head.slice(0, 12)}. Merge it from the task.`, link: `/t/${id}#merge`, source: { run } }, now);
+    store.resolveEpisodes("life", now);
+    return { run, head, publication, ready };
+  };
   const planReady = (ref: number, id: string) =>
     store.enqueueNotification({ dedupeKey: `plan-ready:${id}`, kind: "plan-ready", subject: `${id}: plan ready for review`, body: "Review, edit, and approve the scope — nothing builds until you do.", source: { taskRef: ref } }, now);
 
@@ -155,6 +175,7 @@ describe("decisions finish in the chat app", () => {
     now = T0;
     nextUpdate = 10;
     merges.length = 0;
+    mergeAnswer = { ok: true };
     const alex = addApprover(store, "alex", now);
     if (!alex.ok) throw new Error("bootstrap failed");
     alexToken = alex.token;
@@ -289,11 +310,13 @@ describe("decisions finish in the chat app", () => {
     const lines: string[] = [];
     const code = await runOperate("mode", ["set", "--repo", REPO, "--chat-approve", "--as", "alex", "--token", alexToken], line => lines.push(line), { databaseFile: join(dir, "orders.db") });
     expect(code).toBe(0);
-    expect(lines.join("\n")).toContain("your paired chat app (Telegram, Slack, Discord, Teams) may approve this repository's plans and merge its ready pull requests, two taps each, without your password");
+    // Telegram is the chat app wired today, so the term names it alone.
+    expect(lines.join("\n")).toContain("your paired Telegram chat may approve this repository's plans and merge its ready pull requests, two taps each, without your password");
+    expect(lines.join("\n")).not.toMatch(/Slack|Discord|Teams/);
     expect(JSON.parse(store.activeMode(REPO, new Date())!.termsJson)).toMatchObject({ chatApprove: true });
     const plain = presetTerms("standard", now.toISOString());
     expect(plain.chatApprove).toBe(false);
-    expect(modeWords(plain).join("\n")).not.toContain("paired chat app");
+    expect(modeWords(plain).join("\n")).not.toContain("paired Telegram chat");
   });
 
   test("c2: under a signed chatApprove term a plan approves in chat with two taps, ledgered via telegram with the binding", async () => {
@@ -385,14 +408,7 @@ describe("decisions finish in the chat app", () => {
   });
 
   test("c2: a ready pull request merges in chat with two taps under the term, bound to its commit; otherwise a link", async () => {
-    const { ref, run } = readyResult("merge-9", "Keep the guard readable");
-    const head = "a".repeat(40);
-    const publication = store.createPublicationIntent({ run, taskRef: ref, githubRepo: "o/r", remote: "origin", base: "main", head: "so/merge-9", headSha: head, bodyHash: "h", draft: false }, now);
-    store.handle.prepare("UPDATE publication SET state = 'opened', pr_number = 3 WHERE id = ?").run(publication);
-    store.handle.prepare("INSERT INTO pull_request_follow (publication, ready_head, created_at, updated_at) VALUES (?, ?, ?, ?)").run(publication, head, now.toISOString(), now.toISOString());
-    const ready = () => store.enqueueNotification({ dedupeKey: `pull-request:${publication}:ready:${head}:${now.getTime()}`, kind: "pull-request-ready", pushClass: "merge",
-      subject: "Ready to merge: merge-9 (PR #3)", body: `Checks passed on ${head.slice(0, 12)}. Merge it from the task.`, link: "/t/merge-9#merge", source: { run } }, now);
-    store.resolveEpisodes("life", now);
+    const { run, head, publication, ready } = readyPullRequest("merge-9");
 
     // No term: the link.
     ready();
@@ -413,11 +429,106 @@ describe("decisions finish in the chat app", () => {
     await tapIn(BOB, script.current(BOB, card.messageId).token(/^Yes$/), card.messageId);
     expect(merges).toEqual([{ runId: run, by: "bob" }]);
     expect(script.current(BOB, card.messageId).text).toBe(`${card.text}\n\n✓ Merged.`);
-    expect(store.handle.prepare("SELECT detail FROM action_ledger WHERE action = 'merge approved in chat'").get()!["detail"])
-      .toBe(`via telegram · chat binding #${store.liveTelegramBindingFor(BOT, String(BOB))!.id} · mode ${store.activeMode(REPO, now)!.digest} · ${head.slice(0, 12)}`);
+    // Ledgered after GitHub answered, with what happened.
+    const via = `via telegram · chat binding #${store.liveTelegramBindingFor(BOT, String(BOB))!.id} · mode ${store.activeMode(REPO, now)!.digest} · ${head.slice(0, 12)}`;
+    expect(store.handle.prepare("SELECT outcome, detail FROM action_ledger WHERE action = 'merge approved in chat'").all()).toEqual([{ outcome: "merged", detail: via }]);
     // A commit pushed after the card: the next card's Yes acts on nothing.
     store.handle.prepare("UPDATE pull_request_follow SET ready_head = ? WHERE publication = ?").run("c".repeat(40), publication);
     expect(mergeInChat(store, "merge-9", run, "bob", now)).toEqual({ ok: false, why: "This pull request changed since this card was sent." });
+  });
+
+  test("c2: a chat merge GitHub refuses is ledgered as failed, with why, and the card keeps a way to the task", async () => {
+    const { run, head, ready } = readyPullRequest("merge-12");
+    sign("bob");
+    ready();
+    await pass();
+    const card = script.cardWith(BOB, /^Merge$/);
+    await tapIn(BOB, card.token(/^Merge$/), card.messageId);
+    // Nothing is ledgered before GitHub answers.
+    mergeAnswer = { ok: false, message: "Checks are failing, so it can't merge." };
+    expect(store.handle.prepare("SELECT 1 FROM action_ledger WHERE action = 'merge approved in chat'").all()).toEqual([]);
+    await tapIn(BOB, script.current(BOB, card.messageId).token(/^Yes$/), card.messageId);
+    expect(merges).toEqual([{ runId: run, by: "bob" }]);
+    expect(script.current(BOB, card.messageId).text).toBe(`${card.text}\n\n✗ Not merged: Checks are failing, so it can't merge.`);
+    expect(script.current(BOB, card.messageId).labels).toEqual(["Open task ↗"]);
+    const via = `via telegram · chat binding #${store.liveTelegramBindingFor(BOT, String(BOB))!.id} · mode ${store.activeMode(REPO, now)!.digest} · ${head.slice(0, 12)}`;
+    expect(store.handle.prepare("SELECT actor, task_id, run_id, outcome, detail FROM action_ledger WHERE action = 'merge approved in chat'").all())
+      .toEqual([{ actor: "bob", task_id: "merge-12", run_id: run, outcome: "failed", detail: `${via} · Checks are failing, so it can't merge.` }]);
+  });
+
+  test("c2: a repaint Telegram refuses keeps the card's old buttons working; after Not now a later card for the plan gets fresh ones", async () => {
+    sign("bob");
+    const ref = planWaiting("plan-13", "Refuse over-limit payouts");
+    planReady(ref, "plan-13");
+    await pass();
+    const card = script.cardWith(BOB, /^Approve & start$/);
+    const first = card.token(/^Approve & start$/);
+
+    // A second notice for the plan within the batch window repaints the card; Telegram refuses the edit.
+    now = new Date(now.getTime() + 20_000);
+    script.editFailures.push({ chat: BOB, description: "Bad Request: too many edits" });
+    store.enqueueNotification({ dedupeKey: "plan-ready:plan-13:again", kind: "plan-ready", subject: "plan-13: plan ready for review", body: "Still waiting for you.", source: { taskRef: ref } }, now);
+    await pass();
+    expect(script.inChat(BOB).some(call => call.method === "editMessageText (refused)")).toBe(true);
+    expect(script.current(BOB, card.messageId).token(/^Approve & start$/)).toBe(first);
+    // The buttons still showing still work.
+    await tapIn(BOB, first, card.messageId);
+    expect(script.current(BOB, card.messageId).text).toBe(`${card.text}\n\nApprove and start "Refuse over-limit payouts"?`);
+    await tapIn(BOB, script.current(BOB, card.messageId).token(/^Cancel$/), card.messageId);
+    // The next notice repaints it, and only the new buttons act.
+    const before = script.current(BOB, card.messageId).token(/^Approve & start$/);
+    now = new Date(now.getTime() + 20_000);
+    store.enqueueNotification({ dedupeKey: "plan-ready:plan-13:again-2", kind: "plan-ready", subject: "plan-13: plan ready for review", body: "Still waiting for you.", source: { taskRef: ref } }, now);
+    await pass();
+    expect(script.current(BOB, card.messageId).token(/^Approve & start$/)).not.toBe(before);
+    await tapIn(BOB, before, card.messageId);
+    expect(script.acks().at(-1)).toBe("That button was already used or has expired.");
+
+    // Not now spends this card's buttons.
+    await tapIn(BOB, script.current(BOB, card.messageId).token(/^Not now$/), card.messageId);
+    expect(script.current(BOB, card.messageId).labels).toEqual(["Edit ↗"]);
+    // A later notice in the same window repaints the card with fresh buttons, not the spent ones.
+    now = new Date(now.getTime() + 20_000);
+    store.enqueueNotification({ dedupeKey: "plan-ready:plan-13:later", kind: "plan-ready", subject: "plan-13: plan ready for review", body: "Still waiting for you.", source: { taskRef: ref } }, now);
+    await pass();
+    const repainted = script.current(BOB, card.messageId);
+    expect(repainted.labels).toEqual(["Approve & start", "Edit ↗", "Not now"]);
+    expect(repainted.token(/^Approve & start$/)).not.toBe(first);
+    await tapIn(BOB, repainted.token(/^Approve & start$/), card.messageId);
+    expect(script.current(BOB, card.messageId).labels).toEqual(["Yes", "Cancel"]);
+    await tapIn(BOB, script.current(BOB, card.messageId).token(/^Cancel$/), card.messageId);
+    await tapIn(BOB, script.current(BOB, card.messageId).token(/^Not now$/), card.messageId);
+
+    // And past the window, a new message with fresh buttons that act.
+    now = new Date(now.getTime() + 3 * 60_000);
+    store.enqueueNotification({ dedupeKey: "plan-ready:plan-13:tomorrow", kind: "plan-ready", subject: "plan-13: plan ready for review", body: "Still waiting for you.", source: { taskRef: ref } }, now);
+    await pass();
+    const fresh = script.cardWith(BOB, /^Approve & start$/);
+    expect(fresh.messageId).not.toBe(card.messageId);
+    await tapIn(BOB, fresh.token(/^Approve & start$/), fresh.messageId);
+    await tapIn(BOB, script.current(BOB, fresh.messageId).token(/^Yes$/), fresh.messageId);
+    expect(store.getScope("plan-13")).toMatchObject({ approvedBy: "bob", approvalBasis: "mode" });
+  });
+
+  test("c1: a decide button tapped from another chat is answered with why, and does nothing", async () => {
+    readyResult("guard-14", "Keep the guard readable");
+    await pass();
+    const card = script.cardWith(BOB, /^Accept and finish$/);
+    const before = script.acks().length;
+    const tap = (from: number, chat: { id: number; type: string }) => {
+      script.updates.push([{ update_id: nextUpdate++, callback_query: { id: `cb-${nextUpdate}`, data: card.token(/^Accept and finish$/), from: { id: from },
+        message: { message_id: card.messageId, chat, text: card.text } } }]);
+      return pass();
+    };
+    // Bob, from a group chat; a stranger, from their own.
+    await tap(BOB, { id: -900, type: "group" });
+    await tap(9191, { id: 9191, type: "private" });
+    expect(script.acks().slice(before)).toEqual([
+      "These buttons work only in your own chat with the bot. Nothing was done.",
+      "These buttons work only for the person they were sent to. Nothing was done.",
+    ]);
+    expect(assignment("guard-14")?.state).toBe("ready-to-check");
+    expect(script.current(BOB, card.messageId).labels).toEqual(["Accept and finish", "Request changes", "Look first ↗"]);
   });
 
   test("c3: an agent's question pushes with its options as buttons, and a tap answers it", async () => {

@@ -69,7 +69,7 @@ export type ModeTerms = {
    * `repairAuto` is also true — a mode may sign a cap without signing the
    * authority, but never the reverse. */
   repairMaxAttempts: number;
-  /** Explicit opt-in: the signer's paired chat app may approve this
+  /** Explicit opt-in: the signer's paired Telegram chat may approve this
    * repository's plans and merge its ready pull requests with two taps,
    * for the mode's lifetime. A plan that widens permissions, exceeds the
    * per-attempt budget or touches protected paths still opens Toolroll.
@@ -253,7 +253,7 @@ export function modeWords(terms: ModeTerms): string[] {
     ...(terms.repairAuto
       ? ["historical automatic repair grants are retained on record but no longer schedule work"] : []),
     ...(terms.chatApprove
-      ? ["your paired chat app (Telegram, Slack, Discord, Teams) may approve this repository's plans and merge its ready pull requests, two taps each, without your password; a plan that widens permissions, exceeds the per-attempt cap above or touches protected paths still opens Toolroll"] : []),
+      ? ["your paired Telegram chat may approve this repository's plans and merge its ready pull requests, two taps each, without your password; a plan that widens permissions, exceeds the per-attempt cap above or touches protected paths still opens Toolroll"] : []),
     `everything above ends at ${terms.absoluteExpiry.slice(0, 16).replace("T", " ")} — revoking it earlier is one click, and every act it covered falls back to its own ceremony`,
   ];
 }

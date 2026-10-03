@@ -294,6 +294,19 @@ export function retireDecideTokens(store: Store, channel: DecideChannel, chat: s
     .run(now.toISOString(), channel, chat, message);
 }
 
+/** Buttons minted for a send or an edit that didn't land: they never act. */
+export function dropDecideTokens(store: Store, tokens: readonly string[], now: Date): void {
+  const drop = store.handle.prepare("UPDATE chat_decide_action SET consumed_at = ? WHERE token = ? AND consumed_at IS NULL");
+  for (const token of tokens) drop.run(now.toISOString(), token);
+}
+
+/** Whether a message still carries a button that acts (an offer, or an armed Yes or Cancel): a card whose acts were
+ * all spent, as by Not now, needs fresh ones. */
+export function hasLiveDecideTokens(store: Store, channel: DecideChannel, chat: string, message: string, now: Date): boolean {
+  return store.handle.prepare("SELECT 1 FROM chat_decide_action WHERE channel = ? AND chat = ? AND message = ? AND consumed_at IS NULL AND expires_at > ? LIMIT 1")
+    .get(channel, chat, message, now.toISOString()) !== undefined;
+}
+
 export function isDecideToken(store: Store, token: string): boolean {
   return token.startsWith("d:") && store.handle.prepare("SELECT 1 FROM chat_decide_action WHERE token = ?").get(token) !== undefined;
 }
@@ -307,10 +320,14 @@ export type DecideTapOutcome = {
   /** Ask "What should change?": the person's next message is the feedback. `id` names the prompt, so the channel can
    * record the message it sent (a reply to anything else is not the feedback). */
   prompt?: { id: number; text: string };
-  /** Merge after the transaction (GitHub is a network call); the card says "Merging…" until it lands. */
-  merge?: { runId: number; taskId: string; by: string };
+  /** Merge after the transaction (GitHub is a network call); the card says "Merging…" until it lands, and
+   * `recordChatMerge` ledgers how it went. */
+  merge?: ChatMerge;
   ignored?: boolean;
 };
+
+/** A merge approved in chat, waiting on GitHub: what its ledger line names once the answer is back. */
+export type ChatMerge = { runId: number; taskId: string; by: string; repo: string; via: string };
 
 const QUESTIONS: Record<"accept" | "retry" | "approve" | "merge", (name: string) => string> = {
   accept: name => `Accept and finish "${name}"?`,
@@ -461,13 +478,19 @@ export function applyDecideTap(store: Store, seat: DecideSeat, input: { token: s
     case "merge": {
       const merge = mergeInChat(store, row.taskId, row.run ?? 0, who.name, now);
       if (!merge.ok) return notDone(merge.why);
-      store.recordAction({ at: now.toISOString(), actor: who.name, repo: ref.repo, taskId: row.taskId, runId: row.run, action: "merge approved in chat", outcome: "approved",
-        source: "request", detail: `via ${seat.channel} · chat binding #${seat.binding} · mode ${merge.modeDigest} · ${merge.head.slice(0, 12)}` });
-      return { ack: "Merging…", edit: { text: `${body}\n\nMerging…`, rows: [], tokens: [] }, merge: { runId: row.run ?? 0, taskId: row.taskId, by: who.name } };
+      // Ledgered once GitHub answers (recordChatMerge), with what actually happened.
+      return { ack: "Merging…", edit: { text: `${body}\n\nMerging…`, rows: [], tokens: [] }, merge: { runId: row.run ?? 0, taskId: row.taskId, by: who.name, repo: ref.repo,
+        via: `via ${seat.channel} · chat binding #${seat.binding} · mode ${merge.modeDigest} · ${merge.head.slice(0, 12)}` } };
     }
     default:
       return { ack: "That button doesn't do anything now.", ignored: true };
   }
+}
+
+/** A chat merge's ledger line, after the GitHub call: merged, or failed and why. */
+export function recordChatMerge(store: Store, merge: ChatMerge, result: { ok: true } | { ok: false; message: string }, now: Date): void {
+  store.recordAction({ at: now.toISOString(), actor: merge.by, repo: merge.repo, taskId: merge.taskId, runId: merge.runId, action: "merge approved in chat",
+    outcome: result.ok ? "merged" : "failed", source: "request", detail: result.ok ? merge.via : `${merge.via} · ${phoneText(result.message, 160)}` });
 }
 
 /** What the card says once the merge came back. */
