@@ -153,7 +153,8 @@ function ThreadEntry({ item }: { item: BrowserTaskThreadItem }) {
         {item.author !== "" && <span className="text-muted-foreground">{item.author}</span>}
         <time dateTime={item.at} title={item.at.slice(0, 16).replace("T", " ")} className="ml-auto text-xs tabular-nums text-muted-foreground">{threadWhen(item.at)}</time>
       </p>
-      {item.text !== null && <p className={cn("mt-1 whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]",
+      {/* An entry with no words shows none: never an empty bubble. */}
+      {item.text !== null && item.text.trim() !== "" && <p className={cn("mt-1 whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]",
         item.who === "person" && "w-fit max-w-full rounded-xl bg-[var(--so-user-bubble)] px-3 py-2")}>{item.text}</p>}
       {item.link !== null && <a href={item.link.href} className="mt-1 inline-flex text-[13px] font-medium underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:min-h-11 phone:items-center">{item.link.label}</a>}
       {item.html !== "" && <div className="mt-2"><Html html={item.html} className="so-thread-card" /></div>}

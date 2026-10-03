@@ -10667,10 +10667,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
               : null;
           const proposed = proposeGuarded(store, {
             taskId, author: who.name,
-            goal: body.get("goal") ?? "",
+            goal: body.has("goal-brief") ? `${(body.get("goal") ?? "").trim()}${body.get("goal-brief")}` : body.get("goal") ?? "",
             outOfScope: body.get("not") ?? null,
             touches: (body.get("touches") ?? "").split(/[\n,]/),
-            acceptance: acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")),
+            // The approval sheet's in-place editor sends Done when line by line.
+            acceptance: body.has("requirement-new")
+              ? requirementsFromEditor(body, store.getScope(taskId)?.acceptance ?? [])
+              : acceptanceLinesToInput((body.get("acceptance") ?? "").split("\n")),
             permissionMode,
             qualityMode,
             ...(budgetUsd !== null
@@ -10687,7 +10690,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
             return {
               ok: false,
               status: proposed.reason === "changed" || proposed.reason === "claimed" ? 409 : 400,
-              message: proposed.message ?? `scope not saved: ${proposed.reason}`,
+              message: proposed.message ?? (proposed.reason === "acceptance-required" ? "Not saved: add at least one requirement under Done when." : `scope not saved: ${proposed.reason}`),
             };
           }
           if (coverage !== null && ref.plan === "requested") {
@@ -12132,6 +12135,10 @@ function approvalSheetHtml(input: {
   editHref: string;
   notNowHref: string;
   sticky: boolean;
+  /** Earlier versions of this task still queued or running. */
+  earlierActive: number;
+  /** The in-place editor (task page): the scope route, and a draft the server refused, with why. */
+  edit: { action: string; draft: URLSearchParams | null; problem: string | null } | null;
 }): string {
   const { scope, route, raceTerms } = input;
   // A machine-drafted repair appends its brief to the signed goal; the row
@@ -12172,8 +12179,17 @@ function approvalSheetHtml(input: {
   }
   const planner = legOf("plan");
   if (planner !== undefined) who.push(`Planner ${agentNameWords(planner.provider, planner.model)}`);
-  if (scope.budgetMicrousd !== null) who.push(`Cap ${money(scope.budgetMicrousd)} per attempt`);
-  if (permission === "Full access") who.push("Full access");
+  // What the yes allows, in plain words, right above it: the agent's
+  // permissions, the per-attempt limit, and an earlier version still running.
+  const allowing: string[] = [];
+  const allowed = permissionPlainWordsOf(scope.profile);
+  if (allowed !== null) allowing.push(allowed);
+  if (raceTerms === null) allowing.push(scope.budgetMicrousd === null ? "no attempt limit" : `up to ${money(scope.budgetMicrousd)} per attempt`);
+  if (input.earlierActive > 0) allowing.push(input.earlierActive === 1 ? "an earlier version is still running" : `${input.earlierActive} earlier versions are still running`);
+  const yoursToCheck = scope.acceptance.filter(one => one.evidence.includes("manual-review")).map(one => one.statement.trim().replace(/[.\s]+$/, ""));
+  const consent =
+    (allowing.length === 0 ? "" : `<p class="approval-allowing" data-approval-allowing>You’re allowing: ${allowing.map(escape).join(" · ")}</p>`) +
+    (yoursToCheck.length === 0 ? "" : `<p class="approval-you-check" data-approval-you-check>You’ll check: ${yoursToCheck.map(escape).join("; ")}</p>`);
   const race = raceTerms === null
     ? ""
     : `<p class="approval-race">${raceTerms.n} agents build this separately: ${raceTerms.agents.map(one => escape(agentNameWords(one.provider, one.model))).join(" and ")}. ` +
@@ -12202,7 +12218,7 @@ function approvalSheetHtml(input: {
     : !contract.filed && contract.revision !== true ? `<p class="meta">Nothing was filed before planning, so every term is the planner's proposal.</p>`
     : `<p class="meta">${contract.revision === true ? "Same terms as the previous version." : "The plan keeps exactly what you filed."} <a href="/r/${contract.run}">Planning run ${contract.run}</a></p>`;
   const criteriaDetail = scope.acceptance.length === 0 ? ""
-    : `<ul class="approval-signed-criteria">${scope.acceptance.map(one => `<li><code>${escape(one.id)}</code> ${escape(one.statement)} <span class="meta">needs ${one.evidence.map(escape).join(", ")}</span></li>`).join("")}</ul>`;
+    : `<ul class="approval-signed-criteria">${scope.acceptance.map(one => `<li><code>${escape(one.id)}</code> ${escape(one.statement)} <span class="meta">shown by ${one.evidence.map(kind => escape(EVIDENCE_PLAIN[kind] ?? kind)).join(", ")}</span></li>`).join("")}</ul>`;
   const projection = route?.projection ?? null;
   const agentsDetail = route === null || route === undefined ? ""
     : projection === null
@@ -12229,6 +12245,51 @@ function approvalSheetHtml(input: {
     (scope.candidate ? detail("Saved commit", `<p><code class="approval-commit">${escape(scope.candidate)}</code></p>`) : "") +
     detail("Seal", `<p class="meta">Approval binds to this exact wording. <span class="seal mono">signs ${shortDigest(scope.digest)}</span></p>`) +
     `</details>`;
+  const passwordNote = input.surface === "task" ? "approval-password-note" : "chat-approval-password-note";
+
+  // Edit plan, in place (task page): the rows become fields and save
+  // through the scope's own route. The fields belong to a form after this
+  // one (forms never nest), so Approve never carries them.
+  const edit = input.edit;
+  const draft = edit?.draft ?? null;
+  const editForm = "plan-editor-form";
+  // Each field opens tall enough for what it holds (up to ten lines).
+  const field = (name: string, value: string, rows: number, label: string, hint = ""): string =>
+    `<label class="approval-field"><span class="approval-field-label">${label}</span>${hint === "" ? "" : `<span class="approval-field-hint">${hint}</span>`}` +
+    `<textarea name="${name}" rows="${Math.min(10, Math.max(rows, value.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / 80)), 0)))}" form="${editForm}">${escape(value)}</textarea></label>`;
+  // Done when, one line per requirement in the signed order; the server
+  // matches them back by position (the digest guard keeps that order).
+  const requirement = (name: string, value: string, label: string, placeholder = ""): string =>
+    `<li><input type="text" name="${name}" value="${escape(value)}" aria-label="${label}"${placeholder === "" ? "" : ` placeholder="${placeholder}"`} form="${editForm}"></li>`;
+  const requirements = draft?.getAll("requirement") ?? scope.acceptance.map(one => one.statement);
+  const added = draft?.get("requirement-new") ?? "";
+  const editor = edit === null ? null :
+    `<details class="approval-edit" id="plan-editor"${draft === null ? "" : " open"}>` +
+    `<summary class="approval-link"><span class="approval-edit-open">Edit plan</span><span class="approval-edit-close">Cancel</span></summary>` +
+    `<div class="approval-editor">` +
+    (edit.problem === null ? "" : `<p class="problem" role="alert">${escape(edit.problem)}</p>`) +
+    field("goal", draft?.get("goal") ?? goalShown, 3, "Goal") +
+    field("touches", draft?.get("touches") ?? scope.touches.join("\n"), 2, "Changes", "Only in these paths, one per line. Leave empty for any file.") +
+    field("not", draft?.get("not") ?? scope.outOfScope ?? "", 2, "Won’t touch") +
+    `<fieldset class="approval-field"><legend class="approval-field-label">Done when</legend>` +
+    `<span class="approval-field-hint">Clear a line to drop it.</span><ul class="approval-requirements">` +
+    requirements.map((one, index) => requirement("requirement", one, `Requirement ${index + 1}`)).join("") +
+    requirement("requirement-new", added, "Add a requirement", "Add a requirement") +
+    `</ul></fieldset>` +
+    `<div class="approval-edit-act"><button type="submit" form="${editForm}">Save plan</button></div>` +
+    `</div></details>`;
+  const keptMode = permissionModeOfProfile(scope.profile);
+  const editorForm = edit === null ? "" :
+    `<form method="post" action="${edit.action}" id="${editForm}" class="approval-editor-form">` +
+    `<input type="hidden" name="csrf" value="${escape(input.csrf)}">` +
+    `<input type="hidden" name="sawDigest" value="${escape(scope.digest)}">` +
+    // The terms the editor doesn't show ride along unchanged: a repair's
+    // brief after its goal (it stays in Details), permissions, checks, cap.
+    (repairText === null ? "" : `<input type="hidden" name="goal-brief" value="${escape(repairText[0])}">`) +
+    (keptMode === null ? "" : `<input type="hidden" name="permission-mode" value="${keptMode}">`) +
+    `<input type="hidden" name="quality-mode" value="${escape(scope.qualityMode ?? "default")}">` +
+    `<input type="hidden" name="budget-usd" value="${scope.budgetMicrousd === null ? "" : String(scope.budgetMicrousd / 1_000_000)}">` +
+    `</form>`;
 
   return (
     `<form method="post" action="${input.action}" class="approve-form approval-sheet"${input.surface === "task" ? ` id="approve"` : ""}${input.sticky ? " data-sticky" : ""}>` +
@@ -12250,14 +12311,60 @@ function approvalSheetHtml(input: {
     approvalAmendmentHtml(contract) +
     race +
     (who.length === 0 ? "" : `<p class="approval-who">${who.map(escape).join(" · ")}</p>`) +
+    consent +
     `<div class="approval-act" id="${input.surface === "task" ? "approval-confirm" : "chat-approval-confirm"}">` +
-    `<label class="approval-password"><span class="visually-hidden">Your password</span><input type="password" name="token" autocomplete="current-password" placeholder="Your password"></label>` +
+    `<label class="approval-password"><span class="visually-hidden">Your password</span><input type="password" name="token" autocomplete="current-password" placeholder="Your password" aria-describedby="${passwordNote}"></label>` +
+    `<p class="approval-password-note" id="${passwordNote}">Your password signs this approval.</p>` +
     `<button type="submit" data-primary-action>${submit}</button></div>` +
     `<p class="approval-after">${after}</p>` +
-    `<p class="approval-secondary"><a class="approval-link" href="${escape(input.editHref)}">Edit plan</a><a class="approval-link" href="${escape(input.notNowHref)}">Not now</a></p>` +
+    `<div class="approval-secondary">${editor ?? `<a class="approval-link" href="${escape(input.editHref)}">Edit plan</a>`}<a class="approval-link" href="${escape(input.notNowHref)}">Not now</a></div>` +
     details +
-    `</form>`
+    `</form>` +
+    editorForm
   );
+}
+
+/** Evidence kinds in plain words, for the signed criteria in Details. */
+const EVIDENCE_PLAIN: Record<string, string> = { check: "the project check", screenshot: "screenshots", "changed-path": "changed files", "manual-review": "your own check" };
+
+/** What an agent may do on its own, in a few plain words. */
+function permissionPlainWordsOf(profile: Scope["profile"] | null | undefined): string | null {
+  if (profile === null || profile === undefined) return null;
+  const full = "full access, nothing asks first";
+  if (profile.provider === "claude") {
+    return profile.permissionArgv === "bypassPermissions" ? full
+      : profile.permissionArgv === "auto" ? "file edits and routine commands; anything risky stops"
+      : "file edits only; commands are refused";
+  }
+  if (profile.provider === "gemini") return profile.approvalArgv === "yolo" ? full : "file edits only; other tools are refused";
+  return profile.sandboxMode === "danger-full-access" ? full : "file edits and commands inside the project only";
+}
+
+/** The permission choice a sealed profile carries, as the scope form names it. */
+function permissionModeOfProfile(profile: Scope["profile"] | null | undefined): UnattendedPermissionMode | null {
+  if (profile === null || profile === undefined) return null;
+  return profile.provider === "claude"
+    ? profile.permissionArgv === "bypassPermissions" ? "bypassPermissions" : "auto"
+    : profile.provider === "gemini"
+      ? profile.approvalArgv === "yolo" ? "bypassPermissions" : "auto"
+      : profile.sandboxMode === "danger-full-access" ? "bypassPermissions" : "auto";
+}
+
+/** Done when, from the in-place editor: each line keeps its requirement's
+ * id and evidence by position; an emptied one is dropped; an added one is
+ * yours to check. */
+function requirementsFromEditor(body: URLSearchParams, current: readonly AcceptanceCriterion[]): unknown[] {
+  const used = new Set(current.map(one => one.id));
+  let next = 1;
+  while (used.has(`c${next}`)) next++;
+  const plain = (raw: string): string => raw.replace(/\s+/g, " ").trim();
+  const kept = body.getAll("requirement").slice(0, current.length).flatMap((raw, index) => {
+    const statement = plain(raw);
+    const criterion = current[index]!;
+    return statement === "" ? [] : [{ id: criterion.id, statement, evidence: [...criterion.evidence], how: criterion.how }];
+  });
+  const added = plain(body.get("requirement-new") ?? "");
+  return added === "" ? kept : [...kept, { id: `c${next}`, statement: added, evidence: ["manual-review"], how: null }];
 }
 
 /**
@@ -12341,7 +12448,7 @@ function profileWords(scope: Pick<Scope, "profile" | "profileState" | "unresolve
             : profile.permissionArgv === "auto"
               ? "safe unattended permissions; routine project commands and edits proceed, risky acts stop"
               : "legacy acceptEdits; edits proceed, commands that ask are denied unattended"
-        }, ${profile.maxTurns}-turn runaway breaker, ${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
+        }, stops after ${profile.maxTurns} turns, ${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}; repairs on ${escape(repair)}, ${profile.repairMaxTurns} turns / ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
       : profile.provider === "gemini"
         ? `<p class="meta">runs on <span class="mono">gemini · ${escape(profile.model)}</span> — ${profile.approvalArgv === "yolo" ? "Full access via --approval-mode yolo; every tool auto-approved" : "Auto via --approval-mode auto_edit; edits auto-approved, other tools refused"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}), spend reported in tokens only; repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`
         : `<p class="meta">runs on <span class="mono">${escape(profile.provider)} · ${escape(profile.model)}</span> — ${profile.sandboxMode === "danger-full-access" ? "FULL permissions via --dangerously-bypass-approvals-and-sandbox; nothing asks" : "workspace-write sandbox"}, no turn limit (${Math.round(profile.timeoutSeconds / 60)} min ${profile.timeoutKind === "idle" ? "without progress" : "per attempt"}); repairs on ${escape(repair)}, ${Math.round(profile.repairTimeoutSeconds / 60)} min</p>`;
@@ -13898,9 +14005,33 @@ ${THEME_DARK}
   .approval-act input[type=password] { margin: 0; font-family: var(--font-sans); }
   .approval-act button { margin: 0; min-height: 2.125rem; white-space: nowrap; }
   .approval-after { max-width: 75ch; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
-  .approval-secondary { display: flex; flex-wrap: wrap; gap: 8px; }
+  .approval-allowing, .approval-you-check { max-width: 75ch; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+  .approval-sheet .approval-allowing + .approval-you-check { margin-top: -10px; }
+  .approval-act > button { grid-column: 2; grid-row: 1; }
+  .approval-password-note { grid-column: 1; grid-row: 2; margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
+  .approval-secondary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  details.approval-edit, details.approval-edit[open] { margin: 0; padding: 0; border: 0; border-radius: 0; background: none; }
+  /* Edit plan, in place: the rows become fields where they stood; the
+     approval act and Details step aside until it is saved or cancelled. */
+  .approval-sheet { position: relative; }
+  .approval-edit > summary { list-style: none; cursor: pointer; }
+  .approval-edit > summary::-webkit-details-marker { display: none; }
+  .approval-edit-close, .approval-edit[open] .approval-edit-open { display: none; }
+  .approval-edit[open] .approval-edit-close { display: inline; }
+  .approval-edit[open] > summary { position: absolute; top: 14px; right: 20px; }
+  .approval-sheet:has(.approval-edit[open]) > :not(.approval-sheet-title, .approval-secondary) { display: none; }
+  .approval-secondary:has(> .approval-edit[open]) { display: block; }
+  .approval-secondary:has(> .approval-edit[open]) > a { display: none; }
+  .approval-editor { display: grid; gap: 14px; }
+  .approval-editor .problem { margin: 0; }
+  .approval-field { display: grid; gap: 4px; min-width: 0; margin: 0; padding: 0; border: 0; }
+  .approval-field-label { padding: 0; color: var(--muted-foreground); font-size: 13px; font-weight: 500; line-height: 1.6; }
+  .approval-field-hint { color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+  .approval-field textarea, .approval-field input[type=text] { width: 100%; max-width: 75ch; margin: 0; font-family: var(--font-sans); font-size: 14px; line-height: 1.55; }
+  .approval-requirements { display: grid; gap: 6px; margin: 2px 0 0; padding: 0; list-style: none; }
+  .approval-edit-act button { margin: 0; min-height: 2.125rem; white-space: nowrap; }
   .approval-link { display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--foreground); font-size: 13px; font-weight: 500; text-decoration: none; }
-  .approval-link + .approval-link { border-color: transparent; background: none; color: var(--muted-foreground); }
+  .approval-secondary > .approval-link:not(:first-child) { border-color: transparent; background: none; color: var(--muted-foreground); }
   @media (hover: hover) and (pointer: fine) { .approval-link:hover { background: var(--muted); color: var(--foreground); } }
   details.approval-details { margin: 0; padding: 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: none; }
   details.approval-details[open] { padding-bottom: 0; }
@@ -13920,6 +14051,7 @@ ${THEME_DARK}
     .approval-sheet { gap: 12px; padding: 14px; }
     .approval-row { grid-template-columns: 1fr; gap: 2px; }
     .approval-act { grid-template-columns: 1fr; }
+    .approval-act > button, .approval-password-note { grid-column: auto; grid-row: auto; }
     .approval-act input[type=password], .approval-act button { min-height: 44px; font-size: 16px; }
     .approval-act button { width: 100%; }
     /* The one act stays under the thumb: sticky at the bottom, clear of the home indicator. */
@@ -13928,6 +14060,9 @@ ${THEME_DARK}
       border-top: 1px solid var(--border); background: var(--card);
     }
     .approval-link { min-height: 44px; padding: 0 16px; }
+    .approval-edit[open] > summary { top: 6px; right: 6px; }
+    .approval-field textarea, .approval-field input[type=text] { font-size: 16px; }
+    .approval-edit-act button { width: 100%; min-height: 44px; font-size: 16px; }
     .approval-details > summary { min-height: 44px; }
     .approval-roles > div { grid-template-columns: 1fr; gap: 2px; }
   }
@@ -17253,9 +17388,12 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
       route: focus.route,
       coordinator: approval.coordinator,
       deliverable: approval.deliverable,
-      editHref: `${taskHref(focus.id)}#${approval.planDocument === null ? "scope" : "plan-edit"}`,
+      // Edit plan opens the task page's sheet with its fields ready to edit.
+      editHref: `${taskHref(focus.id)}#${approval.raceTerms !== null ? approval.planDocument === null ? "scope" : "plan-edit" : "plan-editor"}`,
       notNowHref: "/chat",
       sticky: false,
+      earlierActive: focus.assignment?.earlierActive ?? 0,
+      edit: null,
     }) +
     `</section>`
   );
@@ -21327,6 +21465,10 @@ function taskBodyParts(data: {
         `<p class="meta">only your hold can be lifted here — waits caused by questions, incidents, or retry delays clear on their own</p>`;
 
   const approval = approvalOf(scope);
+  // A refused save from the sheet's in-place editor reopens that editor with
+  // its draft; the full scope form below stays as it was.
+  const inlineScopeDraft = data.scopeDraft?.has("requirement-new") === true;
+  const scopeDraft = inlineScopeDraft ? undefined : data.scopeDraft;
   const scopeCard =
     scope === null
       ? `<p class="meta">no scope proposed — nothing builds this until one is approved</p>`
@@ -21506,6 +21648,10 @@ function taskBodyParts(data: {
           editHref: data.csrf !== "" && data.planSha != null && data.planDocument !== null ? "#plan-edit" : "#scope",
           notNowHref: "/work",
           sticky: data.dispatch?.action === "approve-scope",
+          earlierActive: data.assignment?.earlierActive ?? 0,
+          // A tournament's terms live in the full scope editor; every other plan edits in place.
+          edit: data.csrf === "" || (data.raceTerms ?? null) !== null ? null
+            : { action: `${taskHref(task.id)}/scope`, draft: inlineScopeDraft ? data.scopeDraft ?? null : null, problem: inlineScopeDraft ? data.problem : null },
         });
 
   // The attended road (Phase 2E): beside the approval, never replacing it.
@@ -21555,20 +21701,20 @@ function taskBodyParts(data: {
           : "";
 
   const scopeForm = [
-    `<details${scope === null || data.scopeDraft !== undefined ? " open" : ""}><summary>${scope === null ? "write the scope" : "edit the scope"}${
+    `<details${scope === null || scopeDraft !== undefined ? " open" : ""}><summary>${scope === null ? "write the scope" : "edit the scope"}${
       approval.approved ? " (editing voids the approval)" : ""
     }</summary>`,
     `<form method="post" action="${taskHref(task.id)}/scope" class="scope-editor">`,
-    data.scopeDraft === undefined || data.problem === null ? "" : `<div class="problem" role="alert" id="scope-error">${escape(data.problem)}</div>`,
+    scopeDraft === undefined || data.problem === null ? "" : `<div class="problem" role="alert" id="scope-error">${escape(data.problem)}</div>`,
     `<input type="hidden" name="csrf" value="${escape(data.csrf)}">`,
-    `<input type="hidden" name="sawDigest" value="${escape(data.scopeDraft?.get("sawDigest") ?? scope?.digest ?? "")}">`,
-    `<label>goal<textarea name="goal" rows="3"${data.scopeDraft === undefined ? "" : ' autofocus aria-describedby="scope-error"'}>${escape(data.scopeDraft?.get("goal") ?? scope?.goal ?? "")}</textarea></label>`,
-    `<label>not this<textarea name="not" rows="2">${escape(data.scopeDraft?.get("not") ?? scope?.outOfScope ?? "")}</textarea></label>`,
+    `<input type="hidden" name="sawDigest" value="${escape(scopeDraft?.get("sawDigest") ?? scope?.digest ?? "")}">`,
+    `<label>goal<textarea name="goal" rows="3"${scopeDraft === undefined ? "" : ' autofocus aria-describedby="scope-error"'}>${escape(scopeDraft?.get("goal") ?? scope?.goal ?? "")}</textarea></label>`,
+    `<label>not this<textarea name="not" rows="2">${escape(scopeDraft?.get("not") ?? scope?.outOfScope ?? "")}</textarea></label>`,
     `<label>touches <span class="meta">(one per line)</span><textarea name="touches" rows="2">${escape(
-      data.scopeDraft?.get("touches") ?? (scope?.touches ?? []).join("\n"),
+      scopeDraft?.get("touches") ?? (scope?.touches ?? []).join("\n"),
     )}</textarea></label>`,
     `<label>acceptance <span class="meta">(required — one criterion per line: <code>statement | evidence,kinds | how</code>; evidence kinds are check, screenshot, changed-path, manual-review; id is optional and auto-numbered)</span><textarea name="acceptance" rows="3" placeholder="The button opens the settings panel | screenshot">${escape(
-      data.scopeDraft?.get("acceptance") ?? acceptanceToLines(scope?.acceptance ?? []).join("\n"),
+      scopeDraft?.get("acceptance") ?? acceptanceToLines(scope?.acceptance ?? []).join("\n"),
     )}</textarea></label>`,
     (() => {
       const defaults = data.spendDefaults ?? null;
@@ -21579,7 +21725,7 @@ function taskBodyParts(data: {
             ? (defaults.buildPerRunMicrousd / 1_000_000).toFixed(2)
             : "";
       return `<label>agent-reported usage cap <span class="meta">(optional — leave blank for uncapped subscription work)</span>` +
-        `<input type="number" name="budget-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("budget-usd") ?? budgetPrefill)}" placeholder="no cap"></label>` +
+        `<input type="number" name="budget-usd" step="0.01" min="0.01" value="${escape(scopeDraft?.get("budget-usd") ?? budgetPrefill)}" placeholder="no cap"></label>` +
         `<p class="meta">Claude expresses this limiter in API-equivalent dollars even on a membership. It does not switch the run to API billing.</p>`;
     })(),
     (() => {
@@ -21591,13 +21737,13 @@ function taskBodyParts(data: {
             : scope?.profile?.provider === "codex" || scope?.profile?.provider === "openrouter"
               ? scope.profile.sandboxMode === "danger-full-access" ? "bypassPermissions" : "auto"
               : null;
-      const selected: UnattendedPermissionMode = data.scopeDraft?.get("permission-mode") === "bypassPermissions" ? "bypassPermissions" : data.scopeDraft?.get("permission-mode") === "auto" ? "auto" : data.permissionMode ?? profileMode ?? data.permissionDefault ?? "auto";
+      const selected: UnattendedPermissionMode = scopeDraft?.get("permission-mode") === "bypassPermissions" ? "bypassPermissions" : scopeDraft?.get("permission-mode") === "auto" ? "auto" : data.permissionMode ?? profileMode ?? data.permissionDefault ?? "auto";
       return `<fieldset class="permission-field"><legend>agent permissions</legend>` +
         permissionModeChoices("permission-mode", selected) +
         `<p class="meta permission-note">This task’s choice is sealed into its scope. Full access prevents permission prompts or sandbox limits from pausing supported unattended agents.</p></fieldset>`;
     })(),
     (() => {
-      const selected: QualityMode = data.scopeDraft?.get("quality-mode") === "strict" ? "strict" : data.scopeDraft?.get("quality-mode") === "default" ? "default" : scope?.qualityMode ?? data.qualityMode ?? data.qualityDefault ?? "default";
+      const selected: QualityMode = scopeDraft?.get("quality-mode") === "strict" ? "strict" : scopeDraft?.get("quality-mode") === "default" ? "default" : scope?.qualityMode ?? data.qualityMode ?? data.qualityDefault ?? "default";
       return `<fieldset class="permission-field"><legend>quality</legend>` +
         qualityModeChoices("quality-mode", selected) +
         `<p class="meta permission-note">This choice is signed into the scope. Inspect the saved work and actual check results when it is ready. Publication and deployment need their own authorization.</p></fieldset>`;
@@ -21609,8 +21755,8 @@ function taskBodyParts(data: {
       // approval above restates and covers both.
       const defaults = data.spendDefaults ?? null;
       const terms = data.raceTerms ?? null;
-      const selectedCount = data.scopeDraft === undefined ? terms !== null ? terms.n : defaults?.raceAgents ?? 0 : Number(data.scopeDraft.get("race-count") ?? "0");
-      const selectedModel = data.scopeDraft?.get("race-model") ?? terms?.agents[0]?.model ?? "claude-sonnet-5";
+      const selectedCount = scopeDraft === undefined ? terms !== null ? terms.n : defaults?.raceAgents ?? 0 : Number(scopeDraft.get("race-count") ?? "0");
+      const selectedModel = scopeDraft?.get("race-model") ?? terms?.agents[0]?.model ?? "claude-sonnet-5";
       const perPrefill =
         terms !== null
           ? (terms.perAgentBudgetMicrousd / 1_000_000).toFixed(2)
@@ -21633,8 +21779,8 @@ function taskBodyParts(data: {
         `<label>competing model <select name="race-model">` +
           PRICED_BUILD_MODELS.map(model => `<option value="${escape(model)}"${model === selectedModel ? " selected" : ""}>${escape(model)}</option>`).join("") +
           `</select></label>`,
-        `<label>each competing agent may spend ($)<input type="number" name="race-per-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("race-per-usd") ?? perPrefill)}"></label>`,
-        `<label>the whole tournament may spend ($)<input type="number" name="race-total-usd" step="0.01" min="0.01" value="${escape(data.scopeDraft?.get("race-total-usd") ?? totalPrefill)}"></label>`,
+        `<label>each competing agent may spend ($)<input type="number" name="race-per-usd" step="0.01" min="0.01" value="${escape(scopeDraft?.get("race-per-usd") ?? perPrefill)}"></label>`,
+        `<label>the whole tournament may spend ($)<input type="number" name="race-total-usd" step="0.01" min="0.01" value="${escape(scopeDraft?.get("race-total-usd") ?? totalPrefill)}"></label>`,
         // The comparison lanes (Phase 3 slice B): 2-4 rows, any registered
         // provider, exact model required — no dollar fields exist. Blank
         // rows are unused; filling any row files a comparison INSTEAD of a
@@ -21643,9 +21789,9 @@ function taskBodyParts(data: {
         ...[1, 2, 3, 4].map(lane =>
           `<div class="row"><label>agent ${lane} <select name="compare-provider-${lane}">` +
             `<option value="">—</option>` +
-            PROVIDER_IDS.map(provider => `<option value="${escape(provider)}"${data.scopeDraft?.get(`compare-provider-${lane}`) === provider ? " selected" : ""}>${escape(provider)}</option>`).join("") +
+            PROVIDER_IDS.map(provider => `<option value="${escape(provider)}"${scopeDraft?.get(`compare-provider-${lane}`) === provider ? " selected" : ""}>${escape(provider)}</option>`).join("") +
             `</select></label>` +
-            `<label>its exact model<input type="text" name="compare-model-${lane}" value="${escape(data.scopeDraft?.get(`compare-model-${lane}`) ?? "")}" placeholder="e.g. gemini-2.5-pro"></label></div>`,
+            `<label>its exact model<input type="text" name="compare-model-${lane}" value="${escape(scopeDraft?.get(`compare-model-${lane}`) ?? "")}" placeholder="e.g. gemini-2.5-pro"></label></div>`,
         ),
         `</details>`,
       ].join("\n");
@@ -22153,7 +22299,7 @@ function taskBodyParts(data: {
       // The recipe road rides with the scope it reuses (UI polish
       // 2026-09-13), off the title-to-action path.
       ["<h2>scope</h2>", scopeCard, data.repo !== null && data.scope !== null ? `<p class="meta"><a href="/recipes/from-task?task=${encodeURIComponent(task.id)}">Reuse this scope as a recipe →</a></p>` : "", agentsCardHtml(task.id, data.route, data.csrf, data.canEditRoute === true), revisionInApproval ? "" : revisionCard, data.completion != null ? "" : repairChainHtml(data.repairChain ?? null), attendedCard, scopeForm].join("\n"),
-      data.scopeDraft !== undefined || (data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan)),
+      scopeDraft !== undefined || (data.plan !== "requested" && approveForm === "" && !(scope === null && canPlan)),
     ),
     dependencyChoiceNeeded ? "" : section("waits for", waitsForCard, (data.waitsFor ?? []).length > 0, (data.waitsFor ?? []).length),
     section("holds", holds, true, data.holds.length),
@@ -22214,7 +22360,7 @@ function taskBodyParts(data: {
     const feedback = data.revision;
     thread.push({ key: "revision", at: task.createdAt, kind: "reply", who: "person", author: feedback.comments[0]?.author ?? "You",
       title: feedback.kind === "ci-repair" ? "Asked for a CI repair" : feedback.kind === "criterion-repair" ? "Asked for a repair" : "Asked for changes",
-      text: feedback.comments.map(one => `${one.path === null ? "" : `${one.path}${one.line === null ? "" : `:${one.line}`} — `}${one.note}`).join("\n"),
+      text: feedback.comments.map(one => `${one.path === null ? "" : `${one.path}${one.line === null ? "" : `:${one.line}`} — `}${one.note.trim()}`).filter(one => one !== "").join("\n") || null,
       link: { label: `From build #${feedback.sourceRun}`, href: `/r/${feedback.sourceRun}` }, html: "", more: null });
   }
   for (const decision of data.decisions) {
@@ -22330,7 +22476,7 @@ function taskBodyParts(data: {
     sections: [
       ...(previousResult === null || thread.some(one => one.more !== null) ? [] : [{ id: "result", title: previousResult.title, html: previousResult.html, open: false, count: null }]),
       // Questions are in the thread; the scope and the ledgers fold here until asked.
-      ...sectionParts.filter(one => !MANAGE.has(one.id) && one.id !== "decisions").map(one => one.id === "scope" && data.scopeDraft === undefined && (finished || approval.approved) ? { ...one, open: false } : one),
+      ...sectionParts.filter(one => !MANAGE.has(one.id) && one.id !== "decisions").map(one => one.id === "scope" && scopeDraft === undefined && (finished || approval.approved) ? { ...one, open: false } : one),
     ],
     manage: [
       ...sectionParts.filter(one => MANAGE.has(one.id)),

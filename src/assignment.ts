@@ -64,6 +64,8 @@ export type AssignmentSnapshot = {
   need?: { key: NeedKey; build: number | null } | { wait: WaitKey; build: number | null } | null;
   /** The person's lead took it on (lead-voice.ts): "Your lead is on it" until done, handed on, or two quiet hours. */
   lead?: LeadClaim | null;
+  /** How many earlier versions of this task are still queued or running; absent when none. */
+  earlierActive?: number;
 };
 
 /** Status-first handoff for routine reads. Fetch get_assignment only when
@@ -358,7 +360,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   return { version: 1, rootId: family.root.id, activeTaskId: current.id, repo: current.repo, title: family.root.title,
     state, detail, primaryAction, attention: [...new Set(attention)], attempts, owner, receipt, savedContext, completion, handoff,
     publication: publication === null ? null : { state: publication.state, prUrl: publication.prUrl, remoteState: publication.remoteState },
-    review, deployment: { status: "not-recorded" }, ...(need === null ? {} : { need }), ...(lead === null ? {} : { lead }) };
+    review, deployment: { status: "not-recorded" }, ...(need === null ? {} : { need }), ...(lead === null ? {} : { lead }), ...(earlierActive.length === 0 ? {} : { earlierActive: earlierActive.length }) };
 }
 
 type MutationResult = { ok: true; assignment: AssignmentSnapshot } | { ok: false; reason: string; message: string };

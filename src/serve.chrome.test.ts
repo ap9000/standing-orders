@@ -11,7 +11,7 @@ import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
-import { addApprover, approve } from "./scope.js";
+import { addApprover, approve, propose } from "./scope.js";
 import { storeEvidence } from "./evidence.js";
 import { createDecisionServer, SENSITIVE_INPUT } from "./serve.js";
 import { presented, T0, stylesOf, workspaceOf } from "../test/serve-kit.js";
@@ -257,10 +257,12 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(approveForm).toContain('<ul class="approval-done"><li>The payout guard rejects a negative amount.</li><li>The settings panel still opens.</li></ul>');
     const rows = approveForm.slice(0, approveForm.indexOf('<details class="approval-details">'));
     expect(rows).not.toMatch(/\bc[12]\b|requires:/);
-    expect(approveForm).toContain('<code>c1</code> The payout guard rejects a negative amount. <span class="meta">needs check</span>');
-    expect(approveForm).toContain('<code>c2</code> The settings panel still opens. <span class="meta">needs screenshot</span>');
-    // No competing primary: exactly one submit button inside the ceremony form.
-    expect((approveForm.match(/<button type="submit"/g) ?? []).length).toBe(1);
+    expect(approveForm).toContain('<code>c1</code> The payout guard rejects a negative amount. <span class="meta">shown by the project check</span>');
+    expect(approveForm).toContain('<code>c2</code> The settings panel still opens. <span class="meta">shown by screenshots</span>');
+    // No competing primary: exactly one submit button the ceremony form owns
+    // (Edit plan's Save belongs to its own form).
+    expect((approveForm.match(/<button type="submit"(?! form=)/g) ?? []).length).toBe(1);
+    expect(approveForm).toContain('<button type="submit" form="plan-editor-form">Save plan</button>');
     // Advisory `how` never renders inside the ceremony form itself — only
     // in the separate, later scope-EDIT textarea, which legitimately shows
     // it back for editing.
@@ -982,14 +984,21 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(rows).toBeGreaterThan(ceremony);
     expect(confirm).toBeGreaterThan(rows);
     expect(details).toBeGreaterThan(confirm);
-    expect(page.slice(ceremony, page.indexOf("</form>", ceremony)).match(/<button type="submit"/g)).toHaveLength(1);
+    expect(page.slice(ceremony, page.indexOf("</form>", ceremony)).match(/<button type="submit"(?! form=)/g)).toHaveLength(1);
     expect(page).toContain('<button type="submit" data-primary-action>Approve & start</button></div><p class="approval-after">An agent starts in its own branch. You&#39;ll hear when it&#39;s ready to review.</p>'.replace(/&#39;/g, "'"));
-    expect(page).toContain('<a class="approval-link" href="#scope">Edit plan</a><a class="approval-link" href="/work">Not now</a>');
+    // Edit plan opens the rows for editing in place, saved through the scope's own route.
+    expect(page).toContain('<div class="approval-secondary"><details class="approval-edit" id="plan-editor"><summary class="approval-link"><span class="approval-edit-open">Edit plan</span><span class="approval-edit-close">Cancel</span></summary>');
+    expect(page).toContain('</details><a class="approval-link" href="/work">Not now</a></div>');
+    expect(page).toContain('<form method="post" action="/t/t-yes/scope" id="plan-editor-form" class="approval-editor-form">');
+    // What the yes allows sits right above it, and the password says why it is asked.
+    expect(page).toContain('<p class="approval-allowing" data-approval-allowing>You’re allowing: ');
+    expect(page.indexOf("data-approval-allowing")).toBeLessThan(confirm);
+    expect(page).toContain('<p class="approval-password-note" id="approval-password-note">Your password signs this approval.</p>');
     expect(page.slice(rows, confirm)).toContain('<div class="approval-row"><dt>Goal</dt><dd><p class="approval-goal">the goal</p></dd></div>');
     expect(page.slice(rows, confirm)).toContain('<ul class="approval-paths"><li><span class="mono">src/a.ts</span></li></ul>');
     expect(page.slice(rows, confirm)).toContain("<dt>Won’t touch</dt><dd><p>not that</p></dd>");
     // No hashes in the main view: the seal is in Details.
-    expect(page.slice(ceremony, details)).not.toContain("signs ");
+    expect(page.slice(ceremony, details)).not.toContain('class="seal');
     expect(page.slice(details, page.indexOf("</form>", details))).toContain("<h3>Seal</h3>");
     // The recipe road rides with the scope section, off the title-to-action path.
     expect(page.indexOf("Reuse this scope as a recipe")).toBeGreaterThan(page.indexOf('<details class="section" id="scope"'));
@@ -1025,6 +1034,69 @@ describe("the project switcher (board pass): one tap from any screen, forms with
       expect(fix).toContain('<a class="button-link" href="#scope">edit the scope to fix it →</a>');
       expect(fix).not.toContain('action="/t/t-fix/approve"');
     }
+  });
+
+  test("Edit plan edits the goal, changes, won't-touch and done-when in place; the edited plan then approves with the password", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    await fetch(url("/projects/open"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf: csrfOf(home), path: repoA, return: "/" }), redirect: "manual" });
+    store.createTask({ id: "t-edit", title: "edit in place" }, T0);
+    store.placeTask(store.refFor("built-in", "t-edit").id, repoA);
+    propose(store, {
+      taskId: "t-edit", goal: "guard the payout path", outOfScope: "billing", touches: ["src/payout.ts"], budgetMicrousd: 1_500_000, now: T0,
+      acceptance: [
+        { id: "c1", statement: "Negative payouts are refused.", how: "unit test it", evidence: ["check"] },
+        { id: "c2", statement: "The settings panel opens.", how: null, evidence: ["screenshot"] },
+      ],
+    });
+    const before = store.getScope("t-edit")!;
+    const page = await (await fetch(url("/t/t-edit"), { headers: { cookie } })).text();
+    // The plain consent line, the password's reason, and the in-place editor.
+    expect(page).toContain("You’re allowing: file edits and routine commands; anything risky stops · up to $1.50 per attempt</p>");
+    expect(page).not.toContain("data-approval-you-check");
+    expect(page).toContain("Your password signs this approval.");
+    const editor = page.slice(page.indexOf('<details class="approval-edit" id="plan-editor">'), page.indexOf('<details class="approval-details">'));
+    expect(editor).toContain('<textarea name="goal" rows="3" form="plan-editor-form">guard the payout path</textarea>');
+    expect(editor).toContain('<textarea name="touches" rows="2" form="plan-editor-form">src/payout.ts</textarea>');
+    expect(editor).toContain('<textarea name="not" rows="2" form="plan-editor-form">billing</textarea>');
+    expect(editor).toContain('<input type="text" name="requirement" value="Negative payouts are refused." aria-label="Requirement 1" form="plan-editor-form">');
+    expect(editor).not.toContain("unit test it");
+    // Submit exactly what the editor's form carries, with the fields edited.
+    const editorForm = page.slice(page.indexOf('<form method="post" action="/t/t-edit/scope" id="plan-editor-form"'));
+    const hidden = [...editorForm.slice(0, editorForm.indexOf("</form>")).matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!] as [string, string]);
+    expect(Object.fromEntries(hidden)).toMatchObject({ sawDigest: before.digest, "permission-mode": "auto", "quality-mode": before.qualityMode ?? "default", "budget-usd": "1.5" });
+    const edit = (fields: [string, string][]) => fetch(url("/t/t-edit/scope"), { method: "POST", headers: { cookie }, body: new URLSearchParams([...hidden, ...fields]), redirect: "manual" });
+    // Every requirement cleared: refused, and the editor reopens with the draft and why.
+    const refused = await edit([["goal", "guard it harder"], ["touches", ""], ["not", ""], ["requirement", ""], ["requirement", ""], ["requirement-new", ""]]);
+    expect(refused.status).toBe(400);
+    const refusedPage = await refused.text();
+    expect(refusedPage).toContain('<details class="approval-edit" id="plan-editor" open>');
+    expect(refusedPage).toContain('<p class="problem" role="alert">Not saved: add at least one requirement under Done when.</p>');
+    expect(refusedPage).toContain('<textarea name="goal" rows="3" form="plan-editor-form">guard it harder</textarea>');
+    expect(store.getScope("t-edit")?.digest).toBe(before.digest);
+    const saved = await edit([
+      ["goal", "guard the payout path and log refusals"], ["touches", "src/payout.ts\nsrc/log.ts"], ["not", "billing and sign-in"],
+      ["requirement", "Negative and zero payouts are refused."], ["requirement", ""], ["requirement-new", "The refusal reads plainly"],
+    ]);
+    expect(saved.status).toBe(303);
+    const after = store.getScope("t-edit")!;
+    expect(after).toMatchObject({ goal: "guard the payout path and log refusals", touches: ["src/payout.ts", "src/log.ts"], outOfScope: "billing and sign-in", budgetMicrousd: 1_500_000, qualityMode: before.qualityMode, approvedAt: null });
+    // Ids, evidence and guidance kept by position; the cleared one dropped; the added one is yours to check.
+    expect(after.acceptance).toEqual([
+      { id: "c1", statement: "Negative and zero payouts are refused.", how: "unit test it", evidence: ["check"] },
+      { id: "c3", statement: "The refusal reads plainly", how: null, evidence: ["manual-review"] },
+    ]);
+    expect(after.profile).toMatchObject({ provider: "claude", permissionArgv: "auto" });
+    expect(after.digest).not.toBe(before.digest);
+    // The seal is unchanged: the new wording approves only through the password ceremony, bound to its digest.
+    const edited = await (await fetch(url("/t/t-edit"), { headers: { cookie } })).text();
+    expect(edited).toContain('<p class="approval-you-check" data-approval-you-check>You’ll check: The refusal reads plainly</p>');
+    const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(edited)?.[1] ?? "";
+    const digest = /name="digest" value="([0-9a-f]+)"/.exec(edited)?.[1] ?? "";
+    expect(digest).toBe(after.digest);
+    const approved = await fetch(url("/t/t-edit/approve"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf: csrfOf(edited), nonce, digest, token: approverToken }), redirect: "manual" });
+    expect(approved.status).toBe(303);
+    expect(store.getScope("t-edit")).toMatchObject({ approvedDigest: after.digest, approvedBy: "alex" });
   });
 
   test("a sensitive page renders the switcher inert: the name and the one link, no forms in the chrome", async () => {
