@@ -670,7 +670,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
         <CommandMenu workspace={workspace} />
         {isChat && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => setPhoneView("work")}>{hasWork ? "Open work" : "Crew"}</Button>}
         {docked && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => { setPanelTab("chat"); setPhoneView("work"); }}><Icon name="chat" />Ask</Button>}
-        {taskView !== null && <Button variant="secondary" size="sm" className="so-phone-work-button" data-open-details onClick={() => setPhoneView("work")}>Details</Button>}
+        {taskView !== null && <Button variant="secondary" size="sm" className="so-phone-work-button" data-open-details onClick={() => setPhoneView("work")}>Task details</Button>}
       </header>
       {(workspace.notices.length > 0 || (workspace.signIn?.length ?? 0) > 0 || update !== null || (demo !== undefined && !pageScrolls)) && <div className="so-workspace-notices">
         {!pageScrolls && <DemoNotice demo={demo} />}
@@ -708,10 +708,10 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
       <div className="so-ask-body" hidden={panelTab !== "chat"}><LeadChat controller={controller} docked={workspace.view?.kind ?? "task"} /></div>
       {panelTab === "crew" && <Crew workspace={workspace} />}
     </aside>}
-    {taskView !== null && <aside className="so-supporting-panel so-details-panel" data-workspace-detail aria-label="Details">
+    {taskView !== null && <aside className="so-supporting-panel so-details-panel" data-workspace-detail aria-label="Task details">
       <div className="so-details-header">
         <Button variant="ghost" size="sm" className="so-phone-back" onClick={() => setPhoneView("chat")}><Icon name="arrow" />Back</Button>
-        <h2>Details</h2>
+        <h2>Task details</h2>
       </div>
       <div data-view="task-details" className="w-full"><TaskDetails view={taskView} /></div>
     </aside>}

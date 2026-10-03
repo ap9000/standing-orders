@@ -479,7 +479,7 @@ describe("the join road and the People screen, over HTTP", () => {
     // The viewer sees themselves on /people — and only themselves.
     const people = await (await fetch(url("/people"), { headers: { cookie } })).text();
     expect(people).toContain("casey");
-    expect(people).not.toContain("invite someone");
+    expect(people).not.toContain("Invite someone");
 
     // The central gate holds: a viewer's POST is watching, not acting —
     // proved on the bearer road, where no csrf ceremony sits in front.
@@ -496,7 +496,7 @@ describe("the join road and the People screen, over HTTP", () => {
     const cookie = await login("alex", approverToken);
     const csrf = await csrfOf(cookie);
     const people = await (await fetch(url("/people"), { headers: { cookie } })).text();
-    expect(people).toContain("invite someone");
+    expect(people).toContain("Invite someone");
 
     // Without the password, no invite.
     const refused = await fetch(url("/people/invite"), {

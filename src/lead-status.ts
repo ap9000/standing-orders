@@ -136,13 +136,13 @@ export function taskWaitSnapshot(store: Store, taskId: string, now: Date, watche
     const outcome = String(attempt["outcome"]);
     if (outcome === "parked") return answer("Needs a person", "Answer the task's question", true, 1, "needs-person");
     if (outcome !== "built" && outcome !== "no-change") return answer("Failed", "Inspect attempt", true, 1, "failed");
-    if (state !== "done") return answer("Ready", "Review result", true, 0, "ready");
+    if (state !== "done") return answer("Ready", "Open result", true, 0, "ready");
   }
 
   // A completed family is Complete from any of its tasks.
   const completed = state === "done" && familyCompleted(store, taskId);
   if (completed) return answer("Complete", "No action needed", true, 0, "complete");
-  if (state === "done") return answer("Ready", "Review result", true, 0, "ready");
+  if (state === "done") return answer("Ready", "Open result", true, 0, "ready");
   if (state === "failed" || state === "cancelled") return answer("Failed", state === "cancelled" ? "Review cancellation" : "Inspect failure", true, 1, "failed");
 
   const decision = store.handle.prepare(`SELECT decision.id FROM run INDEXED BY lead_status_task_run

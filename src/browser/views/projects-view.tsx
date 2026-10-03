@@ -3,6 +3,7 @@
  * last opened on the second, Open on the right. Opening stays the server's
  * POST (the session's project changes there), so every road is a form. */
 import { BookOpen, FolderOpen, GitBranch, GitPullRequest, ListChecks, Plus } from "lucide-react";
+import { threadWhen } from "./task-view.js";
 import type { ReactNode } from "react";
 import type { BrowserProjectRow, BrowserProjectsView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
@@ -17,15 +18,13 @@ function OpenForm({ csrf, path, destination, children, className }: { csrf: stri
   </form>;
 }
 
-/** Local time, in words people use: today, yesterday, or the date. */
+/** In words people use: today, yesterday, or the date, by the one formatter in the viewer's zone. */
 function openedWords(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  const today = new Date();
-  const days = Math.round((new Date(today.toDateString()).getTime() - new Date(date.toDateString()).getTime()) / 86_400_000);
-  if (days === 0) return "Opened today";
-  if (days === 1) return "Opened yesterday";
-  return `Opened ${new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", ...(date.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }) }).format(date)}`;
+  const words = threadWhen(iso);
+  if (words === "") return "";
+  if (/^\d/.test(words)) return "Opened today";
+  if (words.startsWith("Yesterday")) return "Opened yesterday";
+  return `Opened ${words}`;
 }
 
 function Row({ row, csrf, returnTo, choosing }: { row: BrowserProjectRow; csrf: string; returnTo: string; choosing: boolean }) {

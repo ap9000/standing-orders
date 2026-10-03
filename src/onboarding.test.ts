@@ -181,7 +181,7 @@ test("with no agent signed in, Chat shows the install-and-sign-in command for th
   expect((await fetch(`${base}/chat`, { headers: { cookie } })).headers.get("content-security-policy")).toContain("connect-src 'self'");
   // No jargon form on Chat any more.
   expect(shown.pageHtml ?? "").not.toContain('action="/chat/config"');
-  expect(shown.pageHtml ?? "").not.toContain("weekly ceiling");
+  expect(shown.pageHtml ?? "").not.toContain("Weekly ceiling");
 
   expect(await (await fetch(`${base}/lead/status`, { headers: { cookie } })).json()).toMatchObject({ lead: "off", agent: false });
   // The person runs the command; the next check finds it and the lead turns on.

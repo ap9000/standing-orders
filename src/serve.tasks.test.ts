@@ -149,7 +149,7 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     expect(cockpit).toContain('data-next-action="compare-contest"');
     expect(cockpit).toContain(`<a class="button-link" href="/contest/${contestId}">Compare results</a>`);
     expect(cockpit).toContain(`<a href="/contest/${contestId}">compare the tournament and pick →</a>`);
-    expect(cockpit).not.toContain("pick this result");
+    expect(cockpit).not.toContain("Pick this result");
     expect(cockpit).not.toContain('name="nonce"');
   });
 
@@ -159,10 +159,10 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     // The comparison screen: plain words, both agents, the refusal named.
     const compare = await (await fetch(url(`/contest/${contestId}`), { headers: { cookie } })).text();
     expect(compare).toContain("tournament");
-    expect(compare).toContain("agent 1");
-    expect(compare).toContain("agent 2");
-    expect(compare).toContain("cannot be picked — finished without committing");
-    expect(compare).toContain("pick this result");
+    expect(compare).toContain("Agent 1");
+    expect(compare).toContain("Agent 2");
+    expect(compare).toContain("Cannot be picked — finished without committing");
+    expect(compare).toContain("Pick this result");
     // The GET minted nothing: no nonce field anywhere on it.
     expect(compare).not.toContain('name="nonce"');
 
@@ -177,9 +177,9 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     });
     expect(armed.status).toBe(200);
     const ceremony = await armed.text();
-    expect(ceremony).toContain("pick agent 1");
+    expect(ceremony).toContain("Pick agent 1");
     expect(ceremony).toContain("$0.50"); // the money, restated in dollars
-    expect(ceremony).toContain("nothing is published"); // no grant on this repo
+    expect(ceremony).toContain("Nothing is published"); // no grant on this repo
     const nonce = /name="nonce" value="([A-Za-z0-9_-]+)"/.exec(ceremony)?.[1];
     if (nonce === undefined) throw new Error("no nonce in the ceremony form");
 
@@ -215,8 +215,8 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
 
     // The screen now states the decision.
     const after = await (await fetch(url(`/contest/${contestId}`), { headers: { cookie } })).text();
-    expect(after).toContain("picked by alex");
-    expect(after).not.toContain("pick this result");
+    expect(after).toContain("Picked by alex");
+    expect(after).not.toContain("Pick this result");
   });
 
   test("the comparison reads at a glance (arc 6): one table column per agent, cards side by side, same facts", async () => {
@@ -226,7 +226,7 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
     expect(html).toContain('class="contest-compare"');
     // the table and the cards derive from ONE summary — the same diff words
     expect(html).toContain("1 file(s) · +1 −0");
-    expect((html.match(/agent [0-9]/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect((html.match(/Agent [0-9]/g) ?? []).length).toBeGreaterThanOrEqual(2);
     // ceremonies untouched: the arm form still points at the same act
     expect(html).toContain(`/contest/${contestId}/arm`);
   });
@@ -242,7 +242,7 @@ describe("stage 5 — the tournament comparison screen and the pick ceremony, ov
       body: new URLSearchParams({ csrf, act: "abandon" }),
     });
     const ceremony = await armed.text();
-    expect(ceremony).toContain("abandon this tournament?");
+    expect(ceremony).toContain("Abandon this tournament?");
     expect(ceremony).toContain("marked <strong>failed</strong>");
     const nonce = /name="nonce" value="([A-Za-z0-9_-]+)"/.exec(ceremony)?.[1];
     if (nonce === undefined) throw new Error("no nonce");
@@ -378,14 +378,14 @@ describe("A2 — the live peek over real HTTP: guards, fence, and the names-only
     expect(peeked.status).toBe(200);
     expect(peeked.headers.get("cache-control")).toBe("no-store");
     const body = await peeked.text();
-    expect(body).toContain("best-effort look");
+    expect(body).toContain("Best-effort look");
     expect(body).toContain("app.ts");
     expect(body).toContain("notes.md");
     // Names only — never the bytes that changed.
     expect(body).not.toContain("answer = 42");
     // The run page itself carries the region and its poller.
     const page = await (await fetch(url(`/r/${runId}`), { headers: { cookie } })).text();
-    expect(page).toContain("what is changing right now");
+    expect(page).toContain("What is changing right now");
     expect(page).toContain('id="run-peek"');
   });
 
@@ -690,8 +690,8 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
 
     // The portfolio is all-project even while a project is open.
     const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
-    expect(scopeBarOf(portfolio)).toContain('<summary class="name">all projects<svg');
-    expect(portfolio).toContain("<h1>portfolio</h1>");
+    expect(scopeBarOf(portfolio)).toContain('<summary class="name">All projects<svg');
+    expect(portfolio).toContain("<h1>Portfolio</h1>");
 
     // The queue stays project-bound.
     const queue = await (await fetch(url("/queue"), { headers: { cookie } })).text();
@@ -708,18 +708,18 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
 
     // The rail (workspace package 1): Chat · Tasks · Projects, then the
     // work-tools group where the portfolio lives — order, not mere presence.
-    expect(home).toContain(">portfolio<");
+    expect(home).toContain(">Portfolio<");
     expect(home.indexOf(">Chat<")).toBeLessThan(home.indexOf(">Tasks<"));
     expect(home.indexOf(">Tasks<")).toBeLessThan(home.indexOf(">Projects<"));
-    expect(home.indexOf('<nav class="nav-groups">')).toBeLessThan(home.indexOf(">portfolio<"));
+    expect(home.indexOf('<nav class="nav-groups">')).toBeLessThan(home.indexOf(">Portfolio<"));
 
     // Fleet and the rolled-up board are all-project; the scoped board is not.
     const fleet = await (await fetch(url("/fleet"), { headers: { cookie } })).text();
-    expect(scopeBarOf(fleet)).toContain("all projects");
+    expect(scopeBarOf(fleet)).toContain("All projects");
     const board = await (await fetch(url("/board"), { headers: { cookie } })).text();
     expect(scopeBarOf(board)).toContain('<summary class="name">main<svg');
     const boardAll = await (await fetch(url("/board?scope=all"), { headers: { cookie } })).text();
-    expect(scopeBarOf(boardAll)).toContain('<summary class="name">all projects<svg');
+    expect(scopeBarOf(boardAll)).toContain('<summary class="name">All projects<svg');
   });
 
   test("portfolio hygiene: a hidden project leaks into no row, count, dollar, token, or claim; fictions stay out", async () => {
@@ -783,8 +783,8 @@ describe("the portfolio and the scope bar (portfolio arc, slice 1a)", () => {
     expect(html).toContain(">Keep and backfill</button>");
     expect(html).not.toContain('name="confirm"');
     expect(html).not.toContain('value="drop"');
-    expect(html).toContain("irreversible");
-    expect(html).toContain(">recommended</span>");
+    expect(html).toContain("Irreversible");
+    expect(html).toContain(">Recommended</span>");
 
     // Rows wear project chips.
     expect(html).toContain("main</span>");
@@ -1129,13 +1129,13 @@ describe("the queue (portfolio arc, slice 1b): move-to-front resolved server-sid
     // Money is not in the queue query and is not invented on the screen.
     expect(html).not.toMatch(/\$\s?\d/);
     // The shared column in plain words; the claim primitive folded away.
-    expect(html).toContain("workers take from here when their column is empty");
+    expect(html).toContain("Workers take from here when their column is empty");
     // No explainer disclosure on the screen (reduction pass §2).
     expect(html).not.toContain("how a worker takes from here");
     // Card chips over the existing snapshot shape: state and reservation owner.
-    expect(html).toContain('<span class="badge">queued</span>');
-    expect(html).toContain('<span class="badge">reserved for builder-1</span>');
-    expect(html).toContain("being taken — keeps its claim");
+    expect(html).toContain('<span class="badge">Queued</span>');
+    expect(html).toContain('<span class="badge">Reserved for builder-1</span>');
+    expect(html).toContain("Being taken — keeps its claim");
   });
 });
 
@@ -1708,7 +1708,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const cookie = await login();
     const html = await (await fetch(url("/t/t-live"), { headers: { cookie } })).text();
 
-    expect(html).toContain(`build #${run} · night-shift-1 · running`);
+    expect(html).toContain(`Build #${run} · night-shift-1 · running`);
     expect(html).toContain(`data-live-run="${run}"`);
     expect(html).toContain(`href="/r/${run}">full build view →`);
     // The embedded regions and the scripts that fill them, addressed to
@@ -1747,8 +1747,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const ref2 = seed("t-codex", "built by codex", { provider: "codex", model: "gpt-5-codex" });
     const run2 = live("t-codex", ref2, "codex", "gpt-5-codex");
     const codex = await (await fetch(url("/t/t-codex"), { headers: { cookie } })).text();
-    expect(codex).toContain(`build #${run2} · night-shift-1 · running`);
-    expect(codex).toContain("the live transcript needs the claude harness for now");
+    expect(codex).toContain(`Build #${run2} · night-shift-1 · running`);
+    expect(codex).toContain("The live transcript needs the claude harness for now");
     expect(codex).not.toContain('id="live-transcript"');
     expect(codex).not.toContain("?fragment=transcript");
 
@@ -1756,7 +1756,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // panel there is the static line with the door — never an empty
     // region promising a look that cannot land.
     const pane = await (await fetch(url("/workbench?t=t-live"), { headers: { cookie } })).text();
-    expect(pane).toContain(`build #${run} · night-shift-1 · running`);
+    expect(pane).toContain(`Build #${run} · night-shift-1 · running`);
     expect(pane).toContain("the live view is on the build page");
     expect(pane).toContain(`href="/r/${run}">full build view →`);
     expect(pane).not.toContain('id="run-peek"');
@@ -1788,7 +1788,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
 
     expect(SENSITIVE_INPUT.test(html)).toBe(true);
     // The panel is a static line with the door; nothing polls.
-    expect(html).toContain(`build #${run} · night-shift-1 · running`);
+    expect(html).toContain(`Build #${run} · night-shift-1 · running`);
     expect(html).toContain(`href="/r/${run}">full build view →`);
     expect(html).not.toContain('id="run-peek"');
     expect(html).not.toContain('id="live-transcript"');
@@ -1886,7 +1886,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     const task = await (await fetch(url("/t/t-membership"), { headers: { cookie } })).text();
     expect(task).toContain("$2.75 API-price equivalent from subscription usage (not an API charge)");
     expect(task).toContain("subscription · $2.75 API-price equivalent (not an API charge)");
-    expect(task).not.toContain(">cost<");
+    expect(task).not.toContain(">Cost<");
 
     const runPage = await (await fetch(url(`/r/${run}`), { headers: { cookie } })).text();
     expect(runPage).toContain("subscription · $2.75 API-price equivalent (not an API charge)");
@@ -1928,8 +1928,8 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     expect(rail).toContain('<span class="meta">this attempt</span>');
     // Sections fold with counts: attempts open, spend folded, scope open and addressable.
     expect(html).toContain('<details class="section" id="attempts"><summary><h2>Build activity <span class="lane-count">1</span></h2></summary>');
-    expect(html).toContain('<details class="section" id="usage"><summary><h2>usage</h2></summary>');
-    expect(html).toContain('<details class="section" id="scope" open><summary><h2>scope</h2></summary>');
+    expect(html).toContain('<details class="section" id="usage"><summary><h2>Usage</h2></summary>');
+    expect(html).toContain('<details class="section" id="scope" open><summary><h2>Scope</h2></summary>');
     // Cancel stays armed at the foot, after every section.
     expect(html.lastIndexOf('<details class="arm-danger">')).toBeGreaterThan(html.lastIndexOf('<details class="section"'));
   });
@@ -2140,8 +2140,8 @@ describe("the phase route on the console (v47): one projection on the task page,
     const card = agentsCardOf(html);
     expect(card).toContain("<h3>Agents</h3>");
     expect(card).toContain('<span class="badge">High risk</span>');
-    expect(card).toContain('<span class="badge">stronger configured agents</span>');
-    expect(card).toContain('<span class="badge">awaiting approval</span>');
+    expect(card).toContain('<span class="badge">Stronger configured agents</span>');
+    expect(card).toContain('<span class="badge">Awaiting approval</span>');
     expect(card).toContain('<p class="agents-summary">claude · sonnet plans; claude · opus builds and repairs</p>');
     // Reasons and change controls are CLOSED details, not always-open rows.
     expect(card).toContain('<details class="agents-why"><summary>Why these agents</summary>');
@@ -2149,7 +2149,7 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(card).not.toContain("<details open");
     expect(card).toContain("risk is high — every role uses the strongest configured agent");
     expect(card).toContain("acceptance requires screenshots");
-    expect(card).toContain("<dt>Builder</dt><dd><span class=\"mono\">claude · opus</span> <span class=\"badge\">recommended · strong</span>");
+    expect(card).toContain("<dt>Builder</dt><dd><span class=\"mono\">claude · opus</span> <span class=\"badge\">Recommended · strong</span>");
     // Availability is volatile metadata beside the agents.
     expect(card).not.toContain('<li class="agents-availability-unavailable"><span class="mono">codex</span>');
     expect(card).toContain('<span class="mono">claude</span> not yet checked');
@@ -2169,7 +2169,7 @@ describe("the phase route on the console (v47): one projection on the task page,
     const ceremony = /<form method="post" action="\/t\/payouts\/approve"(.*?)<\/form>/s.exec(html)?.[1] ?? "";
     // One plain line of who builds in view; the full route in Details.
     expect(ceremony).toContain('<p class="approval-who">Builder Claude Opus · Planner Claude Sonnet</p>');
-    const details = ceremony.slice(ceremony.indexOf('<details class="approval-details"><summary>Details</summary>'));
+    const details = ceremony.slice(ceremony.indexOf('<details class="approval-details"><summary>Plan details</summary>'));
     expect(details).toContain("<h3>Why these agents</h3><p>claude · sonnet plans; claude · opus builds and repairs</p>");
     expect(details).toContain("These exact agents are part of what you approve");
     // Plain-English risk consequence, and the runtime mechanics folded away.
@@ -2198,7 +2198,7 @@ describe("the phase route on the console (v47): one projection on the task page,
     const first = store.getScope("payouts")!;
     expect(approve(store, "payouts", "alex", T0, first.digest, approverToken).ok).toBe(true);
     const before = await page(cookie, "/t/payouts");
-    expect(agentsCardOf(before)).toContain('<span class="badge">approved</span>');
+    expect(agentsCardOf(before)).toContain('<span class="badge">Approved</span>');
     expect(agentsCardOf(before)).toContain(`name="sawDigest" value="${first.digest}"`);
     const csrf = csrfOf(before);
     const bad = await post(cookie, "/t/payouts/route", { csrf, sawDigest: first.digest, phase: "plan", provider: "gemini", model: "gemini-2.5-pro" });
@@ -2226,7 +2226,7 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(approvalOf(after)).toMatchObject({ approved: false, reason: "changed" });
     const html = await page(cookie, "/t/payouts");
     const card = agentsCardOf(html);
-    expect(card).toContain("<dt>Planner</dt><dd><span class=\"mono\">claude · sonnet</span> <span class=\"badge\">pinned</span>");
+    expect(card).toContain("<dt>Planner</dt><dd><span class=\"mono\">claude · sonnet</span> <span class=\"badge\">Pinned</span>");
     expect(card).toContain("pinned to claude · sonnet by the plan request — nothing overrides a pin");
     expect(card).toContain("Planner → <span class=\"mono\">claude · sonnet</span>");
     expect(card).toContain('name="clear-phase" value="plan"');
@@ -2272,7 +2272,7 @@ describe("the phase route on the console (v47): one projection on the task page,
     const aside = /<div class="task-chat-agents-aside">(.*?)<p class="meta"><a href="\/t\/payouts#agents">Change agents on the task/s.exec(chat)?.[1] ?? "";
     expect(aside).toContain('<p class="agents-summary">claude · sonnet plans; claude · opus builds and repairs</p>');
     expect(aside).toContain('<span class="badge">High risk</span>');
-    expect(aside).toContain('<span class="badge">awaiting approval</span>');
+    expect(aside).toContain('<span class="badge">Awaiting approval</span>');
     expect(aside).toContain('<details class="agents-why"><summary>Why these agents</summary>');
     expect(aside).toContain('<span class="mono">claude</span> not yet checked');
     // The compact strip lives in the live region, which phones keep even
@@ -2343,7 +2343,7 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(chosen.status).toBe(303);
     expect(store.refFor("built-in", "payouts").routeOverrides).toEqual([expect.objectContaining({ phase: "plan", provider: "claude", model: "opus", by: "alex" })]);
     // A planner choice IS the plan pin (v47): the leg reads pinned, exactly.
-    expect(agentsCardOf(await page(cookie, "/t/payouts"))).toContain("<dt>Planner</dt><dd><span class=\"mono\">claude · opus</span> <span class=\"badge\">pinned</span>");
+    expect(agentsCardOf(await page(cookie, "/t/payouts"))).toContain("<dt>Planner</dt><dd><span class=\"mono\">claude · opus</span> <span class=\"badge\">Pinned</span>");
   });
 
   test("consent: the task page, the focused chat, and the next-up triage all restate the same concise exact agents before the password, with runtime limits closed away", async () => {
@@ -2356,7 +2356,7 @@ describe("the phase route on the console (v47): one projection on the task page,
     const sheet = (ceremony: string): void => {
       const whoAt = ceremony.indexOf('<p class="approval-who">Builder Claude Opus · Planner Claude Sonnet</p>');
       const passwordAt = ceremony.indexOf('name="token"');
-      const detailsAt = ceremony.indexOf('<details class="approval-details"><summary>Details</summary>');
+      const detailsAt = ceremony.indexOf('<details class="approval-details"><summary>Plan details</summary>');
       expect(whoAt).toBeGreaterThan(-1);
       expect(passwordAt).toBeGreaterThan(whoAt);
       expect(detailsAt).toBeGreaterThan(passwordAt);
@@ -2403,7 +2403,7 @@ describe("the phase route on the console (v47): one projection on the task page,
     expect(approve(store, "payouts", "alex", T0, scope.digest, approverToken).ok).toBe(true);
     store.raw().prepare("UPDATE task_scope SET approved_route_json = NULL WHERE task_id = 'payouts'").run();
     const gone = agentsCardOf(await page(cookie, "/t/payouts"));
-    expect(gone).toContain('<span class="badge">cannot be read</span>');
+    expect(gone).toContain('<span class="badge">Cannot be read</span>');
     expect(gone).toContain("the approval sealed no agent route");
     expect(gone).toContain("Nothing runs for this task until its scope is filed again and approved.");
     store.raw().prepare("UPDATE task_scope SET route_era = NULL, proposed_route_json = NULL WHERE task_id = 'payouts'").run();
@@ -2480,7 +2480,7 @@ describe("/peek: every live agent in the console (peek)", () => {
 
     store.finishRun(run, { outcome: "built", now: new Date() });
     const empty = await (await fetch(`${base}/peek`, { headers: { cookie } })).text();
-    expect(empty).toContain("no agent is working right now");
+    expect(empty).toContain("No agent is working right now");
   });
 });
 

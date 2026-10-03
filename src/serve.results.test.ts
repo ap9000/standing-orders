@@ -514,11 +514,11 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     const html = await (await fetch(url("/review?result=t-intent"), { headers: { cookie } })).text();
 
     // The approved intent, escaped.
-    expect(html).toContain("approved by alex");
-    expect(html).toContain("<strong>goal</strong> Guard the payout &lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).toContain("Approved by alex");
+    expect(html).toContain("<strong>Goal</strong> Guard the payout &lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).not.toContain("<script>alert(1)</script>");
-    expect(html).toContain("<strong>not this</strong> No schema changes &amp; no API changes");
-    expect(html).toContain('<span class="meta">expected to touch</span> <span class="mono">src/payout/</span>');
+    expect(html).toContain("<strong>Not this</strong> No schema changes &amp; no API changes");
+    expect(html).toContain('<span class="meta">Expected to touch</span> <span class="mono">src/payout/</span>');
 
     // Every signed criterion, by id, with its adjudicated state and citations.
     for (const [id, state] of [["c1", "pass"], ["c2", "failed"], ["c3", "manual-review"]] as const) {
@@ -1486,8 +1486,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     }
     // The receipt's one primary road opens the shared detail; the detail
     // itself is the same panel on every surface, and the deliverable leads.
-    expect(pages.chat).toContain(`href="/chat?task=t-shared&amp;result=${run}" data-open-result data-primary-action>Open the result</a>`);
-    expect(pages.task).toContain(`data-primary-action>Open the result</a>`);
+    expect(pages.chat).toContain(`href="/chat?task=t-shared&amp;result=${run}" data-open-result data-primary-action>Open result</a>`);
+    expect(pages.task).toContain(`data-primary-action>Open result</a>`);
     for (const html of [pages.detail, pages.run, pages.review]) {
       expect(html).toContain('data-result-panel');
       expect(html).toContain('data-result-lead="screenshots"');

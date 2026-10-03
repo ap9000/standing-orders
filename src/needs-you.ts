@@ -52,7 +52,7 @@ export const NEEDS: Readonly<Record<NeedKey, Need>> = {
   "connect-builder": { sentence: () => "No builder works on this project yet. Connect one so the task can start.", action: { code: "start-worker", label: "Connect a builder" } },
   "start-builder": { sentence: () => "The builder for this project is offline. Start it and the task begins on its own.", action: { code: "start-worker", label: "Start the builder" } },
   vanished: { sentence: context => `${Build(context)} stopped without finishing. Check it, then retry.`, action: { code: "reconcile-run", label: "Check the build" } },
-  "review-result": { sentence: () => "Check the result, then accept it or ask for changes.", action: { code: "open-result", label: "Review result" } },
+  "review-result": { sentence: () => "Check the result, then accept it or ask for changes.", action: { code: "open-result", label: "Open result" } },
   // Accepting it would not help: it was built to terms that are no longer the plan.
   rebuild: { sentence: context => `${Build(context)} was made to an earlier plan. Build it again to the current plan.`, action: { code: "retry-task", label: "Build again" } },
   "earlier-version": { sentence: () => "An earlier version of this task still needs you. Finish it first.", action: { code: "inspect-task", label: "Open earlier version" } },
@@ -65,6 +65,36 @@ export const NEEDS: Readonly<Record<NeedKey, Need>> = {
 export type Ask = "decide" | "review" | "unblock";
 export const ASKS: readonly Ask[] = ["decide", "review", "unblock"];
 export const ASK_LABEL: Readonly<Record<Ask, string>> = { decide: "Decide", review: "Review", unblock: "Unblock" };
+/** A waiting row's chip: the specific thing asked, never its group's own word (no "Decide" chip under Decide).
+ * Null: the group heading and the row's sentence already say it, so the row wears no chip. */
+export type AskChip = "Plan" | "Result" | "Mismatch" | "Plan changed" | "Failed" | "Builder offline";
+/** `mismatch`: the saved report doesn't match its changes; `planChanged`: the plan changed after it was built. */
+export function askChipOf(read: { headline: string; need?: NeedKey | null; mismatch?: boolean; planChanged?: boolean; ask?: Ask | null }): AskChip | null {
+  if (read.headline === "Failed") return "Failed";
+  if (read.planChanged === true || read.need === "rebuild") return "Plan changed";
+  if (read.mismatch === true) return "Mismatch";
+  if (read.headline === "Ready for review" || read.need === "review-result" || read.ask === "review") return "Result";
+  if (read.need === "approval") return "Plan";
+  if (read.need === "start-builder" || read.need === "connect-builder") return "Builder offline";
+  return null;
+}
+
+/** Why a saved result can't simply be accepted yet, in its own words (each Review row says its own reason,
+ * never a boilerplate line). The facts are the ones the Tasks list and the task page both read. */
+export type ResultHoldUp = { hold: string | null; planChanged: boolean; unapproved: boolean; running: boolean; unfinished: boolean;
+  noCommit: boolean; question: boolean; report: boolean };
+export function resultHoldUpSentence(facts: Partial<ResultHoldUp>): string {
+  if (facts.hold != null && facts.hold.trim() !== "" && !hasInternalWords(facts.hold)) return `On hold: ${facts.hold.trim().replace(/[.\s]*$/, "")}. Release the hold to accept it.`;
+  if (facts.hold != null) return "A hold is on this result. Release it to accept the result.";
+  if (facts.planChanged) return "The plan changed after this was built. Build it again to the current plan.";
+  if (facts.unapproved) return "The current plan isn't approved. Approve it, then review the result.";
+  if (facts.question) return "A question is still open. Answer it, then review the result.";
+  if (facts.running) return "A build is still running on this task.";
+  if (facts.unfinished) return "An earlier attempt never finished. Check it, then review the result.";
+  if (facts.noCommit) return facts.report ? "The report is missing or incomplete. Open it to see what was saved." : "The build saved no commit to review. Open the result to see what was kept.";
+  return "Open the result to see what it needs before you can accept it.";
+}
+
 export const NEED_ASK: Readonly<Record<NeedKey, Ask>> = {
   approval: "decide", card: "decide", answer: "decide", questions: "decide", "choose-project": "decide", "define-task": "decide",
   "fix-request": "decide", "choose-agent": "decide",

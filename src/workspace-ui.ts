@@ -23,7 +23,7 @@ export { ACCEPT_NEEDS_REASON };
 import { GOAL_ASSESSMENT_PENDING, manualReviewOnly, plainReasonWords, type ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
 import type { TaskControlView } from "./task-control.js";
-import { plainReasonOf, stageOfCode, taskStatusOf, workToneOf } from "./task-status.js";
+import { OPEN_RESULT, plainReasonOf, stageOfCode, taskStatusOf, workToneOf } from "./task-status.js";
 
 /** The Work destination's views — shortcuts over the same rows, never a
  * persisted state. All is the default. */
@@ -122,7 +122,7 @@ export function reviewStatusOf(review: ReviewFacts | null): DisplayStatus | null
   // is queued or running. A failed review never blocks: the result reads as
   // it would unreviewed, marked "not reviewed" by the result itself.
   if (review === null || review.automaticPending !== true || (review.state !== "queued" && review.state !== "running")) return null;
-  return { token: "reviewing", label: "Reviewing", detail: "An automatic review is reading this result before it reaches you.", tone: "live", action: { label: "Open the result", kind: "open-result" } };
+  return { token: "reviewing", label: "Reviewing", detail: "An automatic review is reading this result before it reaches you.", tone: "live", action: { label: OPEN_RESULT, kind: "open-result" } };
 }
 
 export type PublicationFacts = {
@@ -285,11 +285,11 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       // weighed, so it says nothing about whether that check passed.
       detail: withPublication("What the agent reported doesn't match the changes it saved."),
       tone: "problem",
-      action: { label: "Open the result", kind: "open-review" },
+      action: { label: OPEN_RESULT, kind: "open-review" },
     };
   }
   if (result.verdict === "short" && humanReview) {
-    return { token: "verification-needed", label: "Ready to inspect", detail: withPublication("The remaining requirements need a person's inspection."), tone: "attention", action: { label: "Inspect the result", kind: "open-review" } };
+    return { token: "verification-needed", label: "Ready to inspect", detail: withPublication("The remaining requirements need a person's inspection."), tone: "attention", action: { label: OPEN_RESULT, kind: "open-review" } };
   }
   if (result.verdict === "short") {
     return {
@@ -306,7 +306,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
     // presence facts here.
     return result.recordComplete === false && result.verdict === null
       ? { token: "record-incomplete", label: "No-change result, record incomplete", detail: "The build concluded nothing needed to change, but its handoff or sealed diff is missing.", tone: "problem", action: { label: "Open the record", kind: "open-run" } }
-      : { token: "no-change", label: "No changes were needed", detail: withPublication("The build concluded nothing needed to change; its handoff and sealed diff are on record."), tone: "done", action: { label: "Open the result", kind: "open-result" } };
+      : { token: "no-change", label: "No changes were needed", detail: withPublication("The build concluded nothing needed to change; its handoff and sealed diff are on record."), tone: "done", action: { label: OPEN_RESULT, kind: "open-result" } };
   }
   if (result.verdict === null) {
     return {
@@ -323,7 +323,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       label: "Result saved — checks reported by the agent",
       detail: withPublication("No independent project check ran; the checks listed are the agent's own report."),
       tone: "neutral",
-      action: { label: "Open the result", kind: "open-result" },
+      action: { label: OPEN_RESULT, kind: "open-result" },
     };
   }
   if (published !== null && (published.token === "merge-observed" || published.token === "pr-opened" || published.token === "pr-closed")) {
@@ -332,7 +332,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       label: published.label,
       detail: `The approved check passed against this result. ${published.detail}`,
       tone: published.token === "pr-closed" ? "muted" : "done",
-      action: published.token === "merge-observed" ? { label: "Open the result", kind: "open-result" } : { label: "Open the pull request", kind: "open-pr" },
+      action: published.token === "merge-observed" ? { label: OPEN_RESULT, kind: "open-result" } : { label: "Open the pull request", kind: "open-pr" },
     };
   }
   return {
@@ -340,7 +340,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
     label: "Ready",
     detail: withPublication("The approved check passed against this result."),
     tone: "ready",
-    action: { label: "Open the result", kind: "open-result" },
+    action: { label: OPEN_RESULT, kind: "open-result" },
   };
 }
 
@@ -411,7 +411,7 @@ export function needsPerson(dispatch: DispatchDiagnosis | null): boolean {
 /** Navigation labels describe the available help, not a mutation: opening
  * a hold or pause must never promise that the task has already resumed. */
 const DISPATCH_ACTION_LABELS: Record<DispatchAction, string> = {
-  "open-result": "Open the result",
+  "open-result": OPEN_RESULT,
   "retry-task": "Review and retry",
   "place-task": "Choose a project",
   "write-scope": "Define the task",

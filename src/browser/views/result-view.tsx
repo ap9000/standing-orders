@@ -17,7 +17,7 @@ import {
 import { ACCEPT_NEEDS_REASON, acceptWithChecksOf, requirementsWordsOf, resultActsOf, type ResultActKind, type ResultActs } from "../../result-acts.js";
 import { toneOf } from "./tone.js";
 import { ConfirmStoppedForm, HEADLINE_DOT, RebuildForm, StatusDetails, StatusHeadline, statusWhyLines } from "./status-summary.js";
-import { RetryForm } from "./task-view.js";
+import { RetryForm, threadWhen, whenTitle } from "./task-view.js";
 
 type Selected = NonNullable<BrowserResultView["selected"]>;
 
@@ -29,15 +29,8 @@ function Html({ html, className }: { html: string; className?: string }) {
   return <GuardedHtml html={html} immutable {...(className === undefined ? {} : { className })} />;
 }
 
-/** Local time: the clock for today, otherwise the date. */
-function shortWhen(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  const today = new Date();
-  return date.toDateString() === today.toDateString()
-    ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date)
-    : new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", ...(date.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }) }).format(date);
-}
+/** The one formatter (when-html.ts), in the viewer's zone. */
+const shortWhen = (iso: string): string => threadWhen(iso);
 
 function ResultsMenu({ view }: { view: BrowserResultView }) {
   if (view.results.length === 0) return null;
@@ -65,6 +58,13 @@ function ResultsMenu({ view }: { view: BrowserResultView }) {
       {view.capped !== null && <><DropdownMenuSeparator /><DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Showing the newest {view.capped}; older results open from their task.</DropdownMenuLabel></>}
     </DropdownMenuContent>
   </DropdownMenu>;
+}
+
+/** A report that doesn't match its changes is a warning, never a quiet success: its dot is amber whatever the status tone. */
+export function MismatchHeadline({ headline }: { headline: string }) {
+  return <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug" data-mismatch-headline>
+    <span aria-hidden="true" className="size-2.5 shrink-0 rounded-full bg-warning" />{headline}
+  </h2>;
 }
 
 /** The status card: the headline, one sentence, the facts rows, then any caveat as one line of its own.
@@ -101,9 +101,7 @@ function StatusCard({ selected, acts, answers }: { selected: Selected; acts: Res
   return <Card data-result-status={selected.status.token} data-headline={status?.headline ?? selected.status.label} aria-label="Result status">
     <div className="min-w-0">
       {/* The blocking fact is the headline: the report doesn't match the changes. */}
-      {mismatch?.headline != null ? <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug" data-mismatch-headline>
-            <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", status === null ? DOT[tone] : HEADLINE_DOT[status.tone])} />{mismatch.headline}
-          </h2>
+      {mismatch?.headline != null ? <MismatchHeadline headline={mismatch.headline} />
         : status !== null ? <StatusHeadline status={status} />
         : <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
             <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{selected.status.label}
@@ -364,8 +362,9 @@ function Details({ selected }: { selected: Selected }) {
   const panel = selected.panel;
   const why = panel?.status == null ? [] : statusWhyLines(panel.status);
   const record = selected.record;
-  const rows: { id: string; title: string; hint: string | null; count?: number; body: ReactNode }[] = [
-    { id: "intent", title: "Approved scope", hint: selected.intent?.approval ?? null,
+  const rows: { id: string; title: string; hint: ReactNode; count?: number; body: ReactNode }[] = [
+    { id: "intent", title: "Approved scope", hint: selected.intent === null ? null
+      : <>{selected.intent.approval}{selected.intent.approvedAt != null && <> · <time dateTime={selected.intent.approvedAt} title={whenTitle(selected.intent.approvedAt)}>{threadWhen(selected.intent.approvedAt)}</time></>}</>,
       body: selected.intent === null ? <p className="text-sm text-muted-foreground">No scope was filed for this task, so there is no approved goal or boundary to review.</p> : <Html html={selected.intent.html} className="so-result-intent" /> },
     ...(selected.notes.length === 0 ? [] : [{ id: "notes", title: "Notes", hint: null, count: selected.notes.length,
       body: <ul className="flex flex-col gap-2 text-sm">{selected.notes.map((one, index) => <li key={index}><span className="text-muted-foreground">{one.author} · {shortWhen(one.at)}</span> {one.note}</li>)}</ul> }]),
@@ -386,14 +385,14 @@ function Details({ selected }: { selected: Selected }) {
         </p>
       </div> }]),
   ];
-  return <Card aria-label="Result details" className="gap-0 divide-y divide-border overflow-hidden p-0 phone:p-0">
+  return <Card aria-label="Result record" className="gap-0 divide-y divide-border overflow-hidden p-0 phone:p-0">
     {learning !== "" && <div data-cockpit-section="learning"><Html html={learning} className="so-result-learning" /></div>}
     {rows.map(row => <details key={row.id} id={row.id} className="group scroll-mt-4" data-cockpit-section={row.id}>
       <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3.5 hover:bg-accent/50 phone:min-h-12 phone:px-4 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" aria-hidden="true" />
         <h2 className="text-[15px] font-semibold">{row.title}</h2>
         {row.count !== undefined && <Badge>{row.count}</Badge>}
-        {row.hint !== null && <span className="min-w-0 truncate text-[13px] text-muted-foreground">{row.hint}</span>}
+        {row.hint != null && <span className="min-w-0 truncate text-[13px] text-muted-foreground">{row.hint}</span>}
       </summary>
       <div className="px-5 pb-5 pt-1 phone:px-4">{row.body}</div>
     </details>)}

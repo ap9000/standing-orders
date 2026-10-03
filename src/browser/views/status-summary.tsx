@@ -2,10 +2,10 @@
  * dot, one plain sentence, then quiet detail rows — neutral words, a small
  * icon, colour only on the icon. A problem that doesn't undo the outcome is an
  * amber icon and one action on its own row; red belongs to Failed alone. The
- * exact technical reasons sit behind Details. */
+ * exact technical reasons sit behind More. */
 import { AlertTriangle, Check, ChevronRight, Circle, CircleDot, X } from "lucide-react";
 import type { ReactNode } from "react";
-import type { DetailMark, HeadlineTone, StatusDetail, TaskStatus } from "../../task-status.js";
+import { STATUS_MORE, type DetailMark, type HeadlineTone, type StatusDetail, type TaskStatus } from "../../task-status.js";
 import { Button, Input, cn } from "../components/ui/index.js";
 
 export const HEADLINE_DOT: Record<HeadlineTone, string> = {
@@ -61,7 +61,7 @@ function DetailRow({ detail, runChecks, csrf }: { detail: StatusDetail; runCheck
 
 export function StatusDetails({ status, runChecks = null, csrf = "" }: { status: TaskStatus; runChecks?: InPlaceChecks | null; csrf?: string }) {
   if (status.details.length === 0) return null;
-  return <ul aria-label="Details" className="flex flex-col border-t border-border pt-2 phone:pt-1.5">
+  return <ul aria-label="Status" className="flex flex-col border-t border-border pt-2 phone:pt-1.5">
     {status.details.map(one => <DetailRow key={one.key} detail={one} runChecks={runChecks} csrf={csrf} />)}
   </ul>;
 }
@@ -77,7 +77,7 @@ export function StatusWhy({ status, extra = [] }: { status: TaskStatus; extra?: 
   if (lines.length === 0) return null;
   return <details className="group text-[13px]" data-status-why>
     <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1 font-medium text-muted-foreground hover:text-foreground phone:min-h-11 [&::-webkit-details-marker]:hidden">
-      <ChevronRight className="size-4 transition-transform group-open:rotate-90" aria-hidden="true" />Details
+      <ChevronRight className="size-4 transition-transform group-open:rotate-90" aria-hidden="true" />{STATUS_MORE}
     </summary>
     <div className="flex flex-col gap-1 pb-1 pl-5.5 pt-1 text-muted-foreground">{lines.map(one => <p key={one} className="[overflow-wrap:anywhere]">{one}</p>)}</div>
   </details>;

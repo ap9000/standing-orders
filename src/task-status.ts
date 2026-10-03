@@ -26,6 +26,12 @@ export const HEADLINE_TONE: Readonly<Record<Headline, HeadlineTone>> = {
   "Ready for review": "ready", Complete: "success", Failed: "danger", Stopped: "neutral",
 };
 
+/** The project's own checks and the pull request's CI are two different things, never one word (Checks beside CI). */
+export const CHECKS_LABEL = "Project checks";
+export const PR_CI_LABEL = "PR CI";
+/** The one verb for opening a saved result, on every surface. */
+export const OPEN_RESULT = "Open result";
+
 export type DetailKey = "checks" | "pull-request" | "requirements" | "evidence";
 /** The row's small icon: the only coloured part of a detail. `failed` is red
  * and only ever appears under the Failed headline; `note` is amber. */
@@ -145,16 +151,16 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
     const checksHref = facts.links?.checks ?? facts.links?.result ?? null;
     const runChecks = facts.links?.runChecks === undefined ? null : { label: "Run checks", href: facts.links.runChecks };
     const quick = checks.level === "quick";
-    if (checks.running != null) row("checks", "Checks", `${checks.running === "quick" ? "Quick" : "Full"} checks running`, "running", { href: checksHref });
-    else if (checks.status === "passed") row("checks", "Checks", `${quick ? "Quick checks passed" : "Passed"}${sha === null ? "" : ` on ${sha}`}`, "ok",
+    if (checks.running != null) row("checks", CHECKS_LABEL, `${checks.running === "quick" ? "Quick" : "Full"} checks running`, "running", { href: checksHref });
+    else if (checks.status === "passed") row("checks", CHECKS_LABEL, `${quick ? "Quick checks passed" : "Passed"}${sha === null ? "" : ` on ${sha}`}`, "ok",
       quick && runChecks !== null && headline !== "Complete" ? { href: checksHref, action: { label: "Run full checks", href: runChecks.href } } : { href: checksHref });
-    else if (checks.status === "failed") row("checks", "Checks", `${quick ? "Quick checks failed" : "Failed"}${checks.exitCode === null ? "" : ` (exit ${checks.exitCode})`}`, problem(headline),
+    else if (checks.status === "failed") row("checks", CHECKS_LABEL, `${quick ? "Quick checks failed" : "Failed"}${checks.exitCode === null ? "" : ` (exit ${checks.exitCode})`}`, problem(headline),
       headline === "Failed" ? { href: checksHref } : { action: { label: "See what failed", href: checksHref } });
-    else if (checks.status === "running") row("checks", "Checks", "Running", "running");
-    else if (checks.level === "off") row("checks", "Checks", "Off for this project", "none", runChecks === null ? {} : { action: runChecks });
-    else if (checks.status === "not-run") row("checks", "Checks", "Didn't run", "none", runChecks === null ? {} : { action: runChecks });
+    else if (checks.status === "running") row("checks", CHECKS_LABEL, "Running", "running");
+    else if (checks.level === "off") row("checks", CHECKS_LABEL, "Off for this project", "none", runChecks === null ? {} : { action: runChecks });
+    else if (checks.status === "not-run") row("checks", CHECKS_LABEL, "Didn't run", "none", runChecks === null ? {} : { action: runChecks });
     // A saved check that can't be read is run again where that is possible.
-    else row("checks", "Checks", "Couldn't be read", "note", { action: runChecks ?? { label: "Open the result", href: facts.links?.result ?? null } });
+    else row("checks", CHECKS_LABEL, "Couldn't be read", "note", { action: runChecks ?? { label: OPEN_RESULT, href: facts.links?.result ?? null } });
   }
   const pr = facts.pullRequest;
   if (pr != null) {
@@ -166,9 +172,9 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
     else if (pr.state === "closed") row("pull-request", "Pull request", `${name} closed without merging`, "none", { href: github });
     else if (pr.state === "failed") row("pull-request", "Pull request", "Couldn't open", "note",
       { action: pr.compareUrl ? { label: "Open it on GitHub", href: pr.compareUrl } : { label: "See why", href: facts.links?.pullRequest ?? null }, why: pr.error === null ? "Publishing gave up. The commit is safe locally." : `${pr.error} The commit is safe locally.` });
-    else if (pr.ci === "running") row("pull-request", "Pull request", `${name} open, CI running`, "running", { href: github });
-    else if (pr.ci === "passing") row("pull-request", "Pull request", `${name} open, CI passed`, "ok", { href: github });
-    else if (pr.ci === "failing") row("pull-request", "Pull request", `${name} open, CI failing`, "note", { action: { label: "Open it on GitHub", href: github } });
+    else if (pr.ci === "running") row("pull-request", "Pull request", `${name} open · ${PR_CI_LABEL} running`, "running", { href: github });
+    else if (pr.ci === "passing") row("pull-request", "Pull request", `${name} open · ${PR_CI_LABEL} passed`, "ok", { href: github });
+    else if (pr.ci === "failing") row("pull-request", "Pull request", `${name} open · ${PR_CI_LABEL} failing`, "note", { action: { label: "Open it on GitHub", href: github } });
     else row("pull-request", "Pull request", `${name} open`, "none", { href: github });
   }
   const req = facts.requirements;
@@ -308,13 +314,23 @@ export function assignmentStageOf(assignment: Pick<AssignmentSnapshot, "state" |
   }
 }
 
+type RequirementRow = { state: string; assessment?: { evidenceState?: string } | undefined; review?: unknown };
+/** Evidence that passed and only awaits the retired assessment step is met. */
+const requirementMet = (row: RequirementRow): boolean => row.state === "pass" || (row.assessment?.evidenceState === "pass" && (row.review ?? null) === null);
+/** One requirement's state in words: the card's Requirements row and the Checks tab read this one source, so they
+ * can't disagree. A refuted report verifies none of its requirements, so each reads Unverified, as the card does. */
+export type RequirementWord = "Met" | "You check" | "Not shown yet" | "Not met" | "Unverified";
+export function requirementWordOf(row: RequirementRow, verdict?: string | null): RequirementWord {
+  if (verdict === "refuted") return "Unverified";
+  if (requirementMet(row)) return "Met";
+  return row.state === "manual-review" ? "You check" : row.state === "missing" ? "Not shown yet" : "Not met";
+}
+
 /** Requirements from the stored matrix: met, the ones only a person confirms, and the total. */
-export function requirementsOf(matrix: readonly { state: string; assessment?: { evidenceState?: string } | undefined; review?: unknown }[] | null | undefined): NonNullable<TaskStatusFacts["requirements"]> | null {
+export function requirementsOf(matrix: readonly RequirementRow[] | null | undefined): NonNullable<TaskStatusFacts["requirements"]> | null {
   if (!matrix || matrix.length === 0) return null;
-  // Evidence that passed and only awaits the retired assessment step is met.
-  const met = (row: (typeof matrix)[number]) => row.state === "pass" || (row.assessment?.evidenceState === "pass" && (row.review ?? null) === null);
-  return { met: matrix.filter(met).length, total: matrix.length, yours: matrix.filter(row => !met(row) && row.state === "manual-review").length,
-    missed: matrix.filter(row => !met(row) && (row.state === "failed" || row.state === "missing")).length };
+  return { met: matrix.filter(requirementMet).length, total: matrix.length, yours: matrix.filter(row => requirementWordOf(row) === "You check").length,
+    missed: matrix.filter(row => !requirementMet(row) && (row.state === "failed" || row.state === "missing")).length };
 }
 
 /** A refuted report verifies none of its requirements, whatever it marked met (a person's acceptance doesn't change that). */
@@ -408,18 +424,20 @@ export const statusIconSvg = (mark: DetailMark): string =>
 /** The detail rows as server HTML: quiet rows, colour only on the icon. */
 export function statusDetailsHtml(status: TaskStatus): string {
   if (status.details.length === 0) return "";
-  return `<ul class="status-details" aria-label="Details">` + status.details.map(one => {
+  return `<ul class="status-details" aria-label="Status">` + status.details.map(one => {
     const text = one.href === null ? escapeHtml(one.text) : `<a href="${escapeHtml(one.href)}">${escapeHtml(one.text)}</a>`;
     const action = one.action === null ? "" : one.action.href === null ? `<span class="status-detail-act">${escapeHtml(one.action.label)}</span>` : `<a class="status-detail-act" href="${escapeHtml(one.action.href)}">${escapeHtml(one.action.label)}</a>`;
     return `<li class="status-detail status-detail--${one.mark}" data-status-detail="${one.key}" data-mark="${one.mark}">${statusIconSvg(one.mark)}<span class="status-detail-label">${escapeHtml(one.label)}</span><span class="status-detail-text"><span>${text}</span>${action}</span></li>`;
   }).join("") + `</ul>`;
 }
 
+/** The status card's fold of exact reasons: "More", never a third thing called Details. */
+export const STATUS_MORE = "More";
 /** The technical reasons, one tap away. */
 export function statusWhyHtml(status: TaskStatus, extra: readonly string[] = [], diagnostics: readonly { token: string; label: string; detail: string }[] = []): string {
   const lines = [...new Set([...status.details.flatMap(one => one.why === null ? [] : [`${one.label}: ${one.why}`]), ...status.why, ...extra])];
   if (lines.length === 0 && diagnostics.length === 0) return "";
-  return `<details class="status-why"><summary>Details</summary>${lines.map(one => `<p class="meta">${escapeHtml(one)}</p>`).join("")}` +
+  return `<details class="status-why"><summary>${STATUS_MORE}</summary>${lines.map(one => `<p class="meta">${escapeHtml(one)}</p>`).join("")}` +
     diagnostics.map(one => `<p class="meta" data-work-diagnostic="${escapeHtml(one.token)}">${escapeHtml(one.label)} · ${escapeHtml(one.detail)}</p>`).join("") + `</details>`;
 }
 

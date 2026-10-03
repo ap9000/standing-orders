@@ -91,7 +91,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const tools = /<details class="nav-group" data-group="tools"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
     const settings = /<details class="nav-group" data-group="settings"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
     expect(tools).not.toContain("/settings");
-    expect(settings).toMatch(/^<summary>settings<svg.*?<nav class="nav-group-items"><a href="\/settings" aria-label="settings" title="settings">settings<\/a>/s);
+    expect(settings).toMatch(/^<summary>Settings<svg.*?<nav class="nav-group-items"><a href="\/settings" aria-label="Settings" title="Settings">Settings<\/a>/s);
     // The phone's overflow drawer mirrors it — its own headed section, last.
     const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();
     expect(menu).toContain('<h2 class="menu-group-label">Settings</h2>');
@@ -217,7 +217,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     });
     const cookie = await login();
     const pending = await (await fetch(url("/next"), { headers: { cookie } })).text();
-    expect(pending).toContain("approve this scope");
+    expect(pending).toContain("Approve this scope");
     expect(pending).toContain('class="sticky-actions"');
     expect(workspaceOf(pending).sensitive).toBe(true);
     expect(pending).not.toContain('id="palette-index"');
@@ -225,7 +225,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const granted = approve(store, "t-a", "alex", T0, store.getScope("t-a")?.digest as string, approverToken);
     expect(granted.ok).toBe(true);
     const clear = await (await fetch(url("/next"), { headers: { cookie } })).text();
-    expect(clear).not.toContain("approve this scope");
+    expect(clear).not.toContain("Approve this scope");
     expect(workspaceOf(clear).sensitive).toBe(false);
   });
 
@@ -272,7 +272,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const granted = approve(store, "t-rubric", "alex", T0, store.getScope("t-rubric")?.digest as string, approverToken);
     expect(granted.ok).toBe(true);
     const after = await (await fetch(url("/t/t-rubric"), { headers: { cookie } })).text();
-    const cardAcceptance = after.indexOf(">acceptance<");
+    const cardAcceptance = after.indexOf(">Acceptance<");
     const cardSeal = after.indexOf("approval binds to this exact wording");
     expect(cardAcceptance).toBeGreaterThan(-1);
     expect(cardAcceptance).toBeLessThan(cardSeal);
@@ -692,7 +692,7 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     // Sidebar primary rows carry a drawn icon; the foot's rows stay text.
     expect(html).toMatch(/<a href="\/work"[^>]*><span class="glyph"><svg/);
     expect(html).toMatch(/<a href="\/projects"[^>]*><span class="glyph"><svg/);
-    expect(html).toMatch(/<a href="\/workbench" aria-label="portfolio" title="portfolio">portfolio<\/a>/);
+    expect(html).toMatch(/<a href="\/workbench" aria-label="Portfolio" title="Portfolio">Portfolio<\/a>/);
     // Section headers speak sans; status labels are quiet rounded rectangles,
     // while numeric counts retain the conventional pill silhouette.
     expect(css).toContain("color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);");
@@ -729,7 +729,7 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(pill).toMatch(/<span class="pill-status">.*needs you.*live.*queued.*<\/span>/s);
     const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
     const wide = /<details class="project-pill switcher"><summary>(.*?)<\/summary>/s.exec(portfolio)?.[1] ?? "";
-    expect(wide).toContain('<span class="name">all projects<svg');
+    expect(wide).toContain('<span class="name">All projects<svg');
     expect(wide).not.toContain("pill-status");
   });
 
@@ -833,8 +833,8 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     const cookie = await login();
     const board = await (await fetch(url("/board?scope=all"), { headers: { cookie } })).text();
     const bar = board.slice(board.indexOf('<div class="scope-bar">'), board.indexOf("<main>"));
-    expect(bar).toContain('<summary class="name">all projects<svg');
-    expect(bar).toContain('<button type="submit" class="current" aria-current="true">all projects</button>');
+    expect(bar).toContain('<summary class="name">All projects<svg');
+    expect(bar).toContain('<button type="submit" class="current" aria-current="true">All projects</button>');
     for (const repo of [repoA, repoB]) {
       expect(bar).toContain(`<form method="post" action="/projects/open"><input type="hidden" name="csrf" value="${csrfOf(board)}"><input type="hidden" name="return" value="/board?scope=all"><input type="hidden" name="path" value="${repo}"><button type="submit">${repo.split("/").pop()}</button></form>`);
     }
@@ -859,7 +859,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(response.headers.get("content-security-policy") ?? "").toContain("connect-src 'self'");
     const before = await response.text();
     expect(before).toContain("<h1>Chat</h1>");
-    expect(before).toMatch(/<span class="name">all projects/);
+    expect(before).toMatch(/<span class="name">All projects/);
     expect(before).not.toContain("<h1>projects</h1>");
 
     const csrf = csrfOf(before);
@@ -935,8 +935,8 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     store.placeTask(store.refFor("built-in", "t-a").id, repoA);
     const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
     const card = /<div class="workspace-card hot">.*?<div class="workspace-bar" aria-hidden="true">.*?<\/div><\/div>/s.exec(portfolio)?.[0] ?? "";
-    expect(card).toContain('<span class="workspace-name">alpha</span><span class="badge badge-open">needs you</span>');
-    expect(card).toContain(`<input type="hidden" name="path" value="${repoA}"><input type="hidden" name="return" value="/board"><button type="submit">board →</button>`);
+    expect(card).toContain('<span class="workspace-name">alpha</span><span class="badge badge-open">Needs you</span>');
+    expect(card).toContain(`<input type="hidden" name="path" value="${repoA}"><input type="hidden" name="return" value="/board"><button type="submit">Board →</button>`);
     expect(card).toContain('<span class="pulse-stat hot"><b>1</b> need you</span>');
     expect(card).toContain('<span class="seg attention" style="flex-grow:1"></span>');
     expect(card).not.toContain('class="seg building"');
@@ -976,11 +976,11 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     // The plan is open in its own section: no opener, no "approve exactly this".
     expect(page).toContain('<section class="task-plan-review" aria-label="Approve the plan"><form method="post" action="/t/t-yes/approve"');
     expect(page).not.toContain('<span class="button-link">Approve plan</span></summary>');
-    expect(page).not.toContain("approve exactly this:");
+    expect(page).not.toContain("Approve exactly this:");
     // Plain rows, then who builds, then the one act, its after-line and the secondary acts; Details last.
     const rows = page.indexOf('<dl class="approval-rows">');
     const confirm = page.indexOf('<div class="approval-act" id="approval-confirm">');
-    const details = page.indexOf('<details class="approval-details"><summary>Details</summary>');
+    const details = page.indexOf('<details class="approval-details"><summary>Plan details</summary>');
     expect(rows).toBeGreaterThan(ceremony);
     expect(confirm).toBeGreaterThan(rows);
     expect(details).toBeGreaterThan(confirm);
@@ -1005,7 +1005,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     // Both views stay one tap apart.
     expect(page).toContain('<a href="/t/t-yes" class="active" aria-current="page">Overview</a><a href="/chat?task=t-yes">Ask</a>');
     expect(page).toContain('name="username" autocomplete="username" class="visually-hidden"');
-    expect(page).toContain('<details class="section" id="scope"><summary><h2>scope</h2></summary>');
+    expect(page).toContain('<details class="section" id="scope"><summary><h2>Scope</h2></summary>');
     // No other act wears primary while the ceremony leads; the old
     // "needs your approval" card is gone (the ceremony says it).
     expect(page.slice(bar, page.indexOf("</div>", bar))).not.toContain('class="primary"');
@@ -1017,7 +1017,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     const nextSection = page.indexOf('<details class="section"', scopeStart + 1);
     const scopeSection = page.slice(scopeStart, nextSection === -1 ? page.length : nextSection);
     expect(scopeSection).not.toContain('action="/t/t-yes/approve"');
-    expect(scopeSection).toContain("edit the scope");
+    expect(scopeSection).toContain("Edit the scope");
 
     // A scope the store could not resolve to a routing gets the fix road,
     // never a password it cannot use.
@@ -1269,30 +1269,30 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     const settings = /<details class="nav-group" data-group="settings"([^>]*)>(.*?)<\/details>/s.exec(side);
     expect(tools?.[1]).toBe(" open");
     expect(settings?.[1]).toBe("");
-    expect(tools?.[2]).toContain("<summary>work tools");
-    expect(settings?.[2]).toContain("<summary>settings");
+    expect(tools?.[2]).toContain("<summary>Work tools");
+    expect(settings?.[2]).toContain("<summary>Settings");
     const toolRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(tools?.[2] ?? "")?.[1] ?? "";
     const settingsRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(settings?.[2] ?? "")?.[1] ?? "";
     expect([...toolRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
       "Coding sessions /code",
-      "inbox /inbox",
-      "board /board",
-      "task list /tasks",
-      "recipes /recipes",
-      "routines /routines",
-      "portfolio /workbench",
-      "action ledger /ledger",
-      "spend /spend",
+      "Inbox /inbox",
+      "Board /board",
+      "Task list /tasks",
+      "Recipes /recipes",
+      "Routines /routines",
+      "Portfolio /workbench",
+      "Action ledger /ledger",
+      "Spend /spend",
     ]);
     // Settings is the group's first row only where the console offers it
     // Learning is available even without a telegram token file.
     expect([...settingsRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
-      "settings /settings",
-      "fleet /fleet",
-      "requirements /caps",
-      "people /people",
-      "operating mode /mode",
-      "system /system",
+      "Settings /settings",
+      "Fleet /fleet",
+      "Requirements /caps",
+      "People /people",
+      "Operating mode /mode",
+      "System /system",
     ]);
     // The group rows stay text, the way Linear's does — only the rail's
     // primary rows and the chevrons wear a drawn icon.
@@ -1345,7 +1345,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     }
     const order = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
     expect(order).toContain('<a href="/work" aria-label="Tasks" title="Tasks" class="active" aria-current="page"');
-    expect(order).toContain('<a href="/board" aria-label="board" title="board" class="active">');
+    expect(order).toContain('<a href="/board" aria-label="Board" title="Board" class="active">');
   });
 
   test("every count is a road: the header's counts, and a project card's name and chips, open what they count", async () => {

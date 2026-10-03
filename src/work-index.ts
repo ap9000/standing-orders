@@ -15,7 +15,7 @@ import { plainReasonOf, replacedWords, stageOfCode, taskStatusOf, workToneOf, ty
 import { isCheckLevel } from './check-levels.js';
 import { MARKER } from './worktree.js';
 import { withFollowUps } from './result-follow-ups.js';
-import { ASKS, NEED_ASK, NEEDS, failedAttemptSentence, processNeedOf, type Ask, type NeedKey, type WaitKey } from './needs-you.js';
+import { ASKS, NEED_ASK, NEEDS, askChipOf, failedAttemptSentence, processNeedOf, resultHoldUpSentence, type Ask, type AskChip, type NeedKey, type WaitKey } from './needs-you.js';
 import { LEAD_CLAIM_SQL, LEAD_IDLE_MS } from './lead-voice.js';
 
 export type WorkIndexCounts = Record<WorkView, number>;
@@ -40,6 +40,8 @@ export type WorkIndexItem = {
   status: WorkStatus;
   /** What a Needs you row asks of a person (needs-you.ts); null for every other row. */
   ask: Ask | null;
+  /** The row's chip under its group: the specific ask (needs-you.ts askChipOf), or none. */
+  chip: AskChip | null;
   primaryAction: WorkAction | null;
   completion: { actor: string; at: string; digest: string } | null;
   evidence: 'recorded';
@@ -411,7 +413,8 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     'proof_verdict',(SELECT COALESCE(machine_verdict,verdict) FROM proof_verdict WHERE run=page_result_id),
     'proof_failed_check',(SELECT verdict='refuted' AND reasons_json LIKE '%approved verification command exited%' FROM proof_verdict WHERE run=page_result_id),'code',code,'needs',needs,'person_need',person_need,'lead_claim',lead_claim,'family_running',family_running,'rank',rank,'ask_rank',ask_rank,'list_order',${ORDER},'sort_at',sort_at,
     'checked_actor',checked_actor,'checked_at',checked_at,'checked_digest',checked_digest,'question_id',question_id,
-    'dependency_id',dependency_id,'dependency_state',dependency_state,'custody_unresolved',custody_unresolved,'hold_kind',hold_kind,'hold_reason',substr(hold_reason,1,300),'stop_run',stop_run,'unfinished',unfinished,'signed_out',signed_out,
+    'dependency_id',dependency_id,'dependency_state',dependency_state,'custody_unresolved',custody_unresolved,'hold_kind',hold_kind,'hold_reason',substr(hold_reason,1,300),'hold_id',hold_id,'live_lease',live_lease IS NOT NULL,'approved',COALESCE(approved,0),
+    'plan_changed',scope_digest IS NOT NULL AND digest IS NOT scope_digest,'head_ok',length(head_revision)=40 AND head_revision NOT GLOB '*[^a-f0-9]*','stop_run',stop_run,'unfinished',unfinished,'signed_out',signed_out,
     'question_run',(SELECT run FROM decision WHERE id=page.question_id),'replaced_by',(SELECT successor FROM task_replacement WHERE task_ref=page.ref_id),
     'completed_by_lead',(SELECT lead FROM task_act WHERE task_ref=page.root_ref AND act='completed' ORDER BY id DESC LIMIT 1),
     'question_task',(SELECT r.external_id FROM decision d JOIN run ON run.id=d.run JOIN task_ref r ON r.id=run.task_ref WHERE d.id=page.question_id)) FROM page`)
@@ -491,7 +494,8 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
     running: ['Running now', '', null, ''],
     'waiting-decision': ['Needs your decision', 'An unanswered question is waiting.', n(row, 'question_id') ? 'answer-decision' : 'inspect-decisions', 'Answer question'],
     'decision-queue': ['Needs your decision', 'The decision queue is full.', 'inspect-decisions', 'Review open questions'],
-    'result-needs-attention': ['Needs your decision', 'Inspect the saved result and resolve its remaining execution or scope issue.', 'inspect-run', 'Inspect run'],
+    // Its own reason replaces this below (resultHoldUpSentence).
+    'result-needs-attention': ['Needs your decision', '', 'inspect-run', 'Inspect run'],
     'process-needs-attention': ['Needs your decision', 'A process exit is not recorded. Open the attempt to check whether its work has stopped.', 'inspect-run', 'Inspect run'],
     failed: ['Needs your decision', 'The last attempt stopped.', 'retry-task', 'Review and retry'],
     'vanished-run': ['Needs your decision', 'An unfinished attempt has no current live claim.', 'reconcile-run', 'Check the unfinished attempt'],
@@ -530,6 +534,12 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
   if (code === 'terminal-dependency' && s(row, 'dependency_id') !== null) detail = `${s(row, 'dependency_id')} ${s(row, 'dependency_state') === 'cancelled' ? 'was cancelled' : 'failed'} before it finished.`;
   // A failed task says the latest finished attempt across its whole family, whatever its outcome: its recorded reason, or that none was recorded.
   if (code === 'failed') detail = failedAttemptSentence(s(row, 'attempt_reason'));
+  // A saved result that can't be accepted yet says its own reason, never one line for every such row.
+  const planChanged = code === 'result-needs-attention' && n(row, 'plan_changed') === 1;
+  if (code === 'result-needs-attention') detail = resultHoldUpSentence({ hold: s(row, 'hold_id') === null ? null : s(row, 'hold_reason') ?? '', planChanged,
+    unapproved: n(row, 'approved') !== 1, question: s(row, 'question_id') !== null, running: n(row, 'live_lease') === 1, unfinished: s(row, 'unfinished') !== null,
+    noCommit: !['built', 'no-change'].includes(s(row, 'result_outcome') ?? '') || (s(row, 'result_role') === 'builder' && n(row, 'head_ok') !== 1),
+    report: s(row, 'result_role') === 'scout' });
   if (code === 'result-needs-attention' && n(row, 'custody_unresolved')) detail = 'A process exit is not recorded. Open the result to check whether its work has stopped.';
   if (code === 'result-needs-attention' && ['built', 'no-change'].includes(s(row, 'result_outcome') ?? '')) { actionCode = 'open-result'; actionLabel = 'Open result'; }
   if (process !== null && 'need' in process) { actionCode = 'confirm-stopped'; actionLabel = NEEDS[process.need].action.label; }
@@ -576,6 +586,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
     status: { token: `assignment-${assignmentState}`, label, detail, tone: workToneOf(shared.headline),
       action: primaryAction === null ? null : { label: actionLabel, kind: actionCode === 'open-result' ? 'open-result' : 'open-task' }, views, rank: n(row, 'rank') },
     ask: need ? ASKS[n(row, 'ask_rank')] ?? 'unblock' : null,
+    chip: need ? askChipOf({ headline: shared.headline, need: shared.need?.key ?? null, planChanged, mismatch: verdict === 'refuted' && n(row, 'proof_failed_check') !== 1, ask: ASKS[n(row, 'ask_rank')] ?? 'unblock' }) : null,
     primaryAction, completion: code === 'complete' ? { actor: String(row['checked_actor']), at: String(row['checked_at']), digest: String(row['checked_digest']) } : null,
     evidence: 'recorded' };
 }
