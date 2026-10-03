@@ -7,6 +7,7 @@ import { repositoryContextHtml } from './repository-context-ui.js';
 import { browserAssetsAvailable, browserWorkspaceDocument, serveBrowserAsset } from './browser-shell.js';
 import { browserCrewOf, browserCrewFromIndex, browserWorkActionHref, browserProjectsOf, browserNavigationOf, type BrowserWorkspace, type BrowserChatLink, type BrowserTasksView, type BrowserLimits, type BrowserSettingsView, type BrowserTaskView, type BrowserTaskFact, type BrowserTaskSection, type BrowserTaskThreadItem, type BrowserTaskDetailGroup, type BrowserHome, type BrowserHomeCount, type BrowserCatchUpItem, type BrowserProjectsView, type BrowserProjectRow, type BrowserResultPanel, type BrowserCheckItem, type BrowserResultView, type BrowserNeedAction, type BrowserActionCard, type BrowserSignIn, type BrowserUpdateNotice, type BrowserUpdates, type BrowserFirstRun, type BrowserPhoneCard } from './browser-workspace.js';
 import { configureLeadFollow, leadFollowStatus, runLeadFollowPass } from './lead-follow.js';
+import { cancelCommitment, conditionWords, openCommitments } from './lead-commitments.js';
 import { startMaintenance } from './maintenance.js';
 import { codingHandoffPreview, createCodingHandoff } from './coding-handoff.js';
 import { codingShippingHtml, CODING_SHIPPING_CSS } from './coding-shipping-ui.js';
@@ -4338,8 +4339,9 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         returnTo: "/settings/lead",
       };
       const signedIn = localSignIn?.states.claude === "connected" ? "Claude Code" : localSignIn?.states.codex === "connected" ? "Codex" : null;
+      const promises = openCommitments(store, who.name, 50).map(one => ({ id: one.id, what: one.what, when: conditionWords(store, one.condition), until: one.expiresAt }));
       return sendScreen(response, 200, screen("Lead", leadSettingsHtml({ config, facts, words: leadWords(), signedIn, command: agentSignInCommand(),
-        said: url.searchParams.get("said"), saved: url.searchParams.get("saved") === "1", identity: leadIdentityOf(store, who.name) }), { chrome: chromeFor(project, "settings") }));
+        said: url.searchParams.get("said"), saved: url.searchParams.get("saved") === "1", identity: leadIdentityOf(store, who.name), promises }), { chrome: chromeFor(project, "settings") }));
     }
     if (url.pathname === "/settings/telegram") {
       // Any approver pairs their OWN phone here; the bot token stays on /settings.
@@ -9068,6 +9070,14 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (!checked.ok) return redirect(response, chatReturnWithSaid("/settings/lead", checked.message));
       store.setLeadConfig(who.name, checked.identity.name, checked.identity.persona, now);
       return redirect(response, "/settings/lead?saved=1");
+    }
+    // Settings → Lead: stop the lead following up on one of your promises.
+    if (url.pathname === "/settings/lead/promise/cancel") {
+      if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver manages the lead's promises.", "/settings/lead");
+      const id = Number(body.get("promise"));
+      const done = Number.isSafeInteger(id) && cancelCommitment(store, who.name, id, who.name, "Cancelled in Settings.", now);
+      // The promise leaving the list says it was cancelled; only a refusal needs words.
+      return redirect(response, done ? "/settings/lead" : chatReturnWithSaid("/settings/lead", "That promise was already closed."));
     }
     if (url.pathname === "/settings/lead/on") {
       if (who.via !== "cookie" || who.role !== "approver") return refuse(response, who, 403, "An approver turns the lead on.", "/settings/lead");
@@ -17982,7 +17992,8 @@ type LeadFormFacts = {
 
 /** Settings → Lead: one line for what runs the lead and one action; the full form, turning it off and stored keys under Advanced. */
 function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null; facts: LeadFormFacts; words: string | null; signedIn: string | null; command: string; said: string | null;
-  saved?: boolean; identity?: LeadIdentity }): string {
+  saved?: boolean; identity?: LeadIdentity;
+  promises?: { id: number; what: string; when: string; until: string }[] }): string {
   const { config, facts } = data;
   const hidden = `<input type="hidden" name="csrf" value="${escape(facts.csrf)}"><input type="hidden" name="return" value="/settings/lead">`;
   const summary = config === null
@@ -18004,6 +18015,10 @@ function leadSettingsHtml(data: { config: import("./store.js").ChatConfig | null
       `<label>Name your lead<input name="name" value="${escape(data.identity.name)}" maxlength="${LEAD_NAME_MAX}" autocomplete="off" required></label>` +
       `<label>Persona<textarea name="persona" rows="4" maxlength="${LEAD_PERSONA_MAX}">${escape(data.identity.persona)}</textarea></label>` +
       `<button type="submit">Save</button>${data.saved === true ? ` <span class="meta" role="status">Saved.</span>` : ""}</form>`,
+    // What the lead promised to follow up on; it reports each once, here in chat, and drops it after 7 days.
+    (data.promises ?? []).length === 0 ? "" : `<section class="card lead-promises" data-lead-promises><h2>Promises</h2><ul class="lead-promise-list">${data.promises!.map(one =>
+      `<li data-promise="${one.id}"><p>${escape(one.what)}</p><p class="meta">${escape(one.when.charAt(0).toUpperCase() + one.when.slice(1))} · <span class="nowrap">until ${escape(new Date(one.until).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }))}</span></p>` +
+      `<form method="post" action="/settings/lead/promise/cancel" class="inline">${hidden}<input type="hidden" name="promise" value="${one.id}"><button type="submit" class="secondary">Cancel</button></form></li>`).join("")}</ul></section>`,
     `<details class="lead-advanced" data-lead-advanced><summary>Advanced</summary>`,
     leadConfigForm(config, facts),
     config === null ? "" : `<form method="post" action="/chat/config" class="inline">${hidden}<input type="hidden" name="off" value="1">` +

@@ -14,6 +14,7 @@
  * (finding 11); usage that cannot be true is malformed, never a discount
  * (finding 8); and everything the model sees passed `mateView` (finding 9).
  */
+import type { CommitmentChannel } from "./lead-commitments.js";
 import { Buffer } from "node:buffer";
 import { mateToolLabel, type MateProgress } from "./mate-progress.js";
 import { createHash } from "node:crypto";
@@ -46,6 +47,11 @@ import { leadContext, type LeadChannel } from './lead-context.js';
 import { envValue } from "./names.js";
 
 export const MATE_MESSAGE_MAX_CHARS = 2_000;
+/** Where a promise made this turn is reported: the chat app it arrived on, or this conversation for the console and terminal. */
+function promiseChannelOfTurn(channel: LeadChannel | undefined): CommitmentChannel | undefined {
+  return channel === undefined ? undefined : channel === "console" || channel === "terminal" ? "chat" : channel;
+}
+
 /** The thread's recent history the model sees, most recent first until the cap. */
 export const MATE_HISTORY_CAP_BYTES = 16_384;
 export const MATE_HISTORY_MAX_MESSAGES = 40;
@@ -238,7 +244,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
 
   const view = mateViewContextFor(store, who);
   // Names in the bundle are deliberate (the lead's, the person's first name, project labels); everything else is scrubbed.
-  const document = leadContext(store, who.repos, now, { owner: who.name, redact: text => redactForMate(text, view),
+  const document = leadContext(store, who.repos, now, { owner: who.name, thread: thread.id, redact: text => redactForMate(text, view),
     projectName: (path, index) => projectLabelForMate(path, index, view.names),
     ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.channel === undefined ? {} : { channel: input.channel }), ...(input.leadName === undefined ? {} : { leadName: input.leadName }) });
   const authoredMessage = input.queuedMessageId === undefined ? message : `From ${who.name}:\n${message}`;
@@ -481,7 +487,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
         if (changed !== null) return changed;
       }
       progress({ kind: "tool", turn: turnId, step: steps, label: mateToolLabel(call.name) });
-      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
+      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, thread: thread.id, turn: turnId, ...(promiseChannelOfTurn(input.channel) === undefined ? {} : { channel: promiseChannelOfTurn(input.channel)! }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back (its start), keys
       // blanked. Each line stays whole JSON so a run can assert on what a tool returned rather than on the model's words.

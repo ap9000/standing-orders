@@ -274,6 +274,31 @@ CREATE TABLE IF NOT EXISTS project_mute (
   PRIMARY KEY (account, repo)
 );
 `;
+/** What the lead promised to follow up on (lead-commitments.ts; no version bump: additive only, so a build that
+ * predates it still opens the store). `condition_json` is a task, attempt, check or time; `check_at` is when to look
+ * next; `channel` is where it reports (`chat`: the conversation it was promised in); a promise lapses at `expires_at`. */
+export const LEAD_COMMITMENT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS lead_commitment (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner          TEXT NOT NULL,
+  repo           TEXT,
+  thread         INTEGER NOT NULL,
+  turn           INTEGER,
+  channel        TEXT NOT NULL DEFAULT 'chat',
+  what           TEXT NOT NULL,
+  condition_json TEXT NOT NULL,
+  check_at       TEXT NOT NULL,
+  expires_at     TEXT NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'done', 'cancelled', 'expired')),
+  created_at     TEXT NOT NULL,
+  checked_at     TEXT,
+  closed_at      TEXT,
+  closed_by      TEXT,
+  outcome        TEXT
+);
+CREATE INDEX IF NOT EXISTS lead_commitment_due ON lead_commitment (state, check_at);
+CREATE INDEX IF NOT EXISTS lead_commitment_owner ON lead_commitment (owner, state, id);
+`;
 /** What still pings on the lead's own work: a security alert. */
 const SECURITY_KINDS = new Set(["secret-detected", "security-release"]);
 /** A failure that leaves nothing for the lead to try: the attempts are spent. */
@@ -5143,6 +5168,7 @@ function initializeStore(db: Database, file: string): Store {
   addColumn(db, "chat_batch_item", "notification", "INTEGER");
   db.exec(LEAD_QUIET_SCHEMA);
   db.exec(LEAD_CONFIG_SCHEMA);
+  db.exec(LEAD_COMMITMENT_SCHEMA);
   mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
   // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).
@@ -26366,6 +26392,10 @@ export class Store {
       this.db.prepare(`UPDATE notification_delivery SET receipt = '${TELEGRAM_SKIPPED_ELSEWHERE}'
         WHERE destination = ? AND delivered_at IS NULL AND receipt IS NULL
           AND notification IN (SELECT id FROM notification WHERE recipient IS NOT NULL AND recipient <> ?)`).run(destination, binding.approver);
+      // A promise the lead made on another chat is reported there (lead-commitments.ts), not here.
+      this.db.prepare(`UPDATE notification_delivery SET receipt = '${TELEGRAM_SKIPPED_OTHER_CHAT}'
+        WHERE destination = ? AND delivered_at IS NULL AND receipt IS NULL
+          AND notification IN (SELECT id FROM notification WHERE dedupe_key LIKE 'lead-promise:%' AND dedupe_key NOT LIKE 'lead-promise:telegram:%')`).run(destination);
       // Pings follow responsibility (the lead's work, this person's own act, a muted project): settled here, unsent.
       for (const raw of this.db.prepare(`SELECT n.* FROM notification n JOIN notification_delivery d ON d.notification = n.id AND d.destination = ?
           WHERE n.resolved_at IS NULL AND d.delivered_at IS NULL AND d.receipt IS NULL AND (d.claim_owner IS NULL OR d.claim_expires_at <= ?)`).all(destination, now.toISOString())) {
@@ -27445,6 +27475,8 @@ function readHold(row: Record<string, unknown>): Hold {
 export const TELEGRAM_SKIPPED_RECEIPT = "skipped:before-pairing";
 /** v83: a notification for another person, settled for this destination without sending. */
 export const TELEGRAM_SKIPPED_ELSEWHERE = "skipped:for-another-person";
+/** A met promise the lead made on another chat: reported there, settled here without sending. */
+export const TELEGRAM_SKIPPED_OTHER_CHAT = "skipped:for-another-chat";
 /** A fact this person is not messaged about: the lead's work, their own act, or a project they muted. */
 export const TELEGRAM_SKIPPED_QUIET = "skipped:quiet";
 

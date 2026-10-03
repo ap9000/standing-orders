@@ -37,6 +37,7 @@ import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerso
 import { BATCH_MS, chatText, chatTitle } from "./chat-voice.js";
 import { LEAD_SAY_KIND, enqueueLeadLapses, leadSayEarlier, leadSayText, leadSubjectOf } from "./lead-voice.js";
 import { leadChannelOf } from "./lead-context.js";
+import { promiseChannelOf } from "./lead-commitments.js";
 import { phoneText, PHONE_HELP, phoneCommand, phoneStatus, phoneTaskView, phoneTaskChoices, phoneTaskListText, resolvePhoneTask, phoneFocusText, PHONE_NO_MATCH, PHONE_BACK_TO_LEAD } from "./telegram-status.js";
 import { applyRoomInbound, conversationRow, roomCardApprover, roomCommand, roomGrantAllowed, roomMessagesAfter, roomMessageText, teamDomain } from "./chat-rooms.js";
 import { isTelegramProgressNotification, proposalTaskOf, type Store } from "./store.js";
@@ -837,6 +838,8 @@ export async function planChatNotifications(
       if (
         notification.createdAt >= binding.created &&
         notification.resolvedAt === null &&
+        // A promise the lead made on another chat is reported there (lead-commitments.ts).
+        (promiseChannelOf(notification) ?? state.channel) === state.channel &&
         // Pings follow responsibility: the lead's work, this person's own act and a muted project stay in the console.
         store.pingAllowed(notification, binding.approver) &&
         // A flow decision for "anyone who approves" reaches every approver who can see the project.

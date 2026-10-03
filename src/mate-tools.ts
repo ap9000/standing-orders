@@ -12,7 +12,8 @@ import { taskControlOf } from "./task-control.js";
 import { taskWorkSummaryOf } from "./work-summary.js";
 import { assignmentOf, assignmentBrief } from "./assignment.js";
 import { validateScopeText, validateTaskText, TASK_SCOPE_TEXT_SCHEMA } from "./task-text.js";
-import { conversationKnowledge } from "./project-knowledge.js";
+import { conversationKnowledge, knowledgeView } from "./project-knowledge.js";
+import { cancelCommitment, CHECK_RESULTS, type CommitmentChannel, conditionWords, latestResultRun, recordCommitment, RUN_OUTCOMES, TASK_STATES, type CommitmentCondition, type TaskState } from "./lead-commitments.js";
 import { searchMemory } from "./project-memory.js";
 import { readChatResult, reviewInputProblem, type ReviewSnapshot } from "./chat-review.js";
 import { RESULT_IMAGES_PER_TURN_CAP, selectResultImages, type ResultImagePick } from "./chat-evidence.js";
@@ -70,6 +71,11 @@ export type MateToolContext = {
   selectEvidence?: (rows: readonly Omit<MateTurnEvidence, "turn" | "ordinal" | "createdAt">[]) => readonly number[];
   /** How this surface delivers selected images: Telegram sends them as documents after the reply; every other surface shows identity only. */
   mediaDelivery?: "documents";
+  /** The conversation and turn this call runs in: where a promise (commit_to) is reported. Absent: no promise can be kept. */
+  thread?: number;
+  turn?: number;
+  /** The chat this turn arrived on, where a promise is reported; absent: the console or terminal conversation. */
+  channel?: CommitmentChannel;
 };
 
 export type MateToolResult = { ok: true; body: unknown } | { ok: false; message: string };
@@ -1142,6 +1148,119 @@ export const MATE_TOOLS: MateTool[] = [
       if (thread === null || thread.ceilingDigest !== ctx.who.ceilingDigest) return { ok: true, body: { task: root, messages: [], notice: "No conversation about this task yet." } };
       const messages = ctx.store.listMateMessages(thread.id, limit).map(one => ({ from: one.role === "operator" ? "operator" : "lead", text: one.text.length > 1_200 ? `${one.text.slice(0, 1_200)}…` : one.text, at: one.createdAt }));
       return { ok: true, body: { task: root, title: family?.root.title ?? null, messages, notice: messages.length === limit ? "Only the most recent messages are shown." : null } };
+    },
+  },
+  {
+    name: "commit_to",
+    description: "Whenever you tell the operator you will follow up ('I'll tell you when the checks pass'), record it here in the same turn. when: task (reaching states), run (an attempt finishing), check (the next checks on a task, or an attempt's checks, passing or failing) or time (an ISO time). You report with one short line on the chat the promise was made on when it is met; promises lapse after 7 days.",
+    inputSchema: schema({ what: { type: "string", minLength: 3, maxLength: 240 }, when: { type: "string", enum: ["task", "run", "check", "time"] }, task: TASK_ARG, run: { type: "integer", minimum: 1 },
+      states: { type: "array", items: { type: "string", enum: [...TASK_STATES] }, minItems: 1, maxItems: 6 }, outcome: { type: "string", enum: [...RUN_OUTCOMES] },
+      result: { type: "string", enum: [...CHECK_RESULTS] }, at: { type: "string" }, checkAfter: { type: "string" } }, ["what", "when"]),
+    handle: (ctx, args) => {
+      if (ctx.thread === undefined) return { ok: false, message: "Promises are kept in a conversation; this one cannot record them." };
+      if (!honest(args["what"], 240)) return { ok: false, message: "Say what you promised in one short sentence." };
+      const when = args["when"], taskArg = args["task"], runArg = args["run"];
+      if (args["checkAfter"] !== undefined && (typeof args["checkAfter"] !== "string" || !ISO_STAMP.test(args["checkAfter"]))) return { ok: false, message: "checkAfter is an ISO time in UTC." };
+      let condition: CommitmentCondition, repo: string | null = null;
+      const taskOf = () => {
+        if (typeof taskArg !== "string") return null;
+        const ref = admittedRef(ctx, taskArg);
+        if (ref === null) return null;
+        repo = ref.repo;
+        return ctx.store.taskFamilyOf(taskArg, ctx.who.repos, false)?.root.id ?? taskArg;
+      };
+      const runOf = () => {
+        if (!Number.isSafeInteger(runArg)) return null;
+        const run = ctx.store.getRun(Number(runArg)), ref = run === null ? null : ctx.store.refById(run.taskRef);
+        if (ref === null || ref.repo === null || !ctx.who.repos.includes(ref.repo) || !ctx.store.accountCanAccess(ctx.who.name, ref.repo)) return null;
+        repo = ref.repo;
+        return Number(runArg);
+      };
+      if (when === "task") {
+        const task = taskOf();
+        if (task === null) return notFound();
+        const states = Array.isArray(args["states"]) && args["states"].length > 0 ? args["states"] : ["ready-to-check", "needs-decision", "complete"];
+        if (!states.every(one => TASK_STATES.includes(one as TaskState))) return { ok: false, message: `states are ${TASK_STATES.join(", ")}` };
+        condition = { kind: "task", task, states: [...new Set(states as TaskState[])] };
+      } else if (when === "run") {
+        const run = runOf();
+        if (run === null) return { ok: false, message: "Choose an attempt (run) of a task in your projects." };
+        condition = { kind: "run", run, outcome: RUN_OUTCOMES.includes(args["outcome"] as never) ? args["outcome"] as typeof RUN_OUTCOMES[number] : "finished" };
+      } else if (when === "check") {
+        const result = CHECK_RESULTS.includes(args["result"] as never) ? args["result"] as typeof CHECK_RESULTS[number] : "either";
+        if (taskArg !== undefined) {
+          const task = taskOf();
+          if (task === null) return notFound();
+          condition = { kind: "check", task, result, afterRun: latestResultRun(ctx.store, task, ctx.who.repos, ctx.now) };
+        } else {
+          const run = runOf();
+          if (run === null) return { ok: false, message: "Choose a task or an attempt (run) whose checks to wait for." };
+          condition = { kind: "check", run, result };
+        }
+      } else if (when === "time") {
+        if (typeof args["at"] !== "string" || !ISO_STAMP.test(args["at"])) return { ok: false, message: "at is an ISO time in UTC." };
+        condition = { kind: "time", at: new Date(args["at"]).toISOString() };
+      } else return { ok: false, message: "when is task, run, check or time." };
+      try {
+        const made = recordCommitment(ctx.store, { owner: ctx.who.name, repo, thread: ctx.thread, turn: ctx.turn ?? null, channel: ctx.channel ?? "chat", what: String(args["what"]), condition,
+          checkAt: typeof args["checkAfter"] === "string" ? new Date(args["checkAfter"]).toISOString() : null }, ctx.now);
+        return { ok: true, body: { commitment: made.id, condition: conditionWords(ctx.store, made.condition), expires: made.expiresAt, report: ctx.channel === undefined || ctx.channel === "chat" ? "one short line in this conversation when it is met" : `one short line here on ${ctx.channel} when it is met` } };
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : "That promise could not be recorded." };
+      }
+    },
+  },
+  {
+    name: "release_commitment",
+    description: "Stop following up on one of your open promises (listed in your catch-up) when a correction or change makes it wrong or unneeded. Say what you changed in your reply.",
+    inputSchema: schema({ commitment: { type: "integer", minimum: 1 }, reason: { type: "string", minLength: 3, maxLength: 240 } }, ["commitment", "reason"]),
+    handle: (ctx, args) => {
+      if (!Number.isSafeInteger(args["commitment"]) || !honest(args["reason"], 240)) return { ok: false, message: "Choose an open promise and say why it no longer applies." };
+      return cancelCommitment(ctx.store, ctx.who.name, Number(args["commitment"]), "lead", String(args["reason"]), ctx.now)
+        ? { ok: true, body: { commitment: Number(args["commitment"]), state: "cancelled" } }
+        : { ok: false, message: "That promise is not open." };
+    },
+  },
+  {
+    name: "remember",
+    description: "When the operator corrects you or states a lasting preference ('don't run full checks on this project'), propose it at once as a card: kind decision (a settled choice with its reason) or instruction (added to the project's standing instructions; pass the instructions revision from your catch-up, 0 when it has none). Once confirmed it is in your next turn's catch-up.",
+    inputSchema: schema({ repo: REPO_ARG, kind: { type: "string", enum: ["decision", "instruction"] }, text: { type: "string", minLength: 3, maxLength: 240 }, why: { type: "string", maxLength: 2000 }, source: { type: "string", maxLength: 200 },
+      revision: { type: "integer", minimum: 0 } }, ["repo", "kind", "text"]),
+    handle: (ctx, args) => {
+      const repo = repoPathOf(ctx.who, args["repo"]);
+      if (repo === null) return { ok: false, message: "Choose a project from list_repos." };
+      if (!honest(args["text"], 240)) return { ok: false, message: "Say the correction in one sentence." };
+      const text = String(args["text"]).trim();
+      // One card per correction: a card still waiting in this conversation for the same change is the one to confirm.
+      const waiting = ctx.thread === undefined ? [] : ctx.store.listMateProposals(ctx.thread, ["drafting", "pending", "confirming"])
+        .filter(one => one.kind === "action" && one.payload["repo"] === repo);
+      const same = (words: unknown) => typeof words === "string" && words.trim().toLowerCase() === text.toLowerCase();
+      let operation: ChatAction, input: Record<string, unknown>;
+      if (args["kind"] === "decision") {
+        const twin = waiting.find(one => one.payload["operation"] === "decision_record" && same((one.payload["request"] as Record<string, unknown> | undefined)?.["claim"]));
+        if (twin !== undefined) return { ok: false, message: `Card ${twin.id} already proposes this decision; it is waiting to be confirmed.` };
+        if (!honest(args["why"], 2000)) return { ok: false, message: "A decision needs its reason (why)." };
+        operation = "decision_record";
+        input = { repo, claim: text, why: String(args["why"]).trim(), ...(typeof args["source"] === "string" && args["source"].trim() ? { source: args["source"].trim() } : {}) };
+      } else if (args["kind"] === "instruction") {
+        const view = knowledgeView(ctx.store, repo, ctx.who.name), current = view.knowledge.instructions.trim();
+        // The card adds a line to the instructions the lead read; once they have changed it would replace someone else's edit.
+        if (!Number.isSafeInteger(args["revision"])) return { ok: false, message: "Pass the instructions revision from your catch-up (0 when the project has none)." };
+        if (args["revision"] !== view.revision) return { ok: false, message: `The project's instructions changed since you read them (now revision ${view.revision}). Read them again with get_project_knowledge before proposing.` };
+        const twin = waiting.find(one => one.payload["operation"] === "knowledge_instructions");
+        if (twin !== undefined) return { ok: false, message: `Card ${twin.id} already changes these instructions and is waiting to be confirmed; confirm or dismiss it first.` };
+        if (current.split("\n").some(line => line.replace(/^[-*]\s*/, "").trim() === text)) return { ok: false, message: "The project's instructions already say this." };
+        const instructions = current === "" ? text : `${current}\n${text}`;
+        if (instructions.length > 4000) return { ok: false, message: "The project's instructions are full; propose knowledge_instructions with a shorter version." };
+        operation = "knowledge_instructions";
+        input = { repo, instructions };
+      } else return { ok: false, message: "kind is decision or instruction." };
+      let action: ReturnType<typeof prepareSharedAction>;
+      try { action = prepareSharedAction(ctx.store, ctx.who, operation, input, ctx.evidenceRoot, ctx.now); }
+      catch (error) { return { ok: false, message: error instanceof Error ? error.message : "That card could not be prepared." }; }
+      const id = ctx.draft("action", { ...action });
+      return id === null ? tooMany() : { ok: true, body: { proposal: id, label: action.title, awaiting: "confirmation", executed: false,
+        next: "Once confirmed it is in your next catch-up. Then re-check the open proposals and promises it affects and say what you changed." } };
     },
   },
   {

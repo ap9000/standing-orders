@@ -37,6 +37,9 @@ const TOOL_LABELS: Record<string, string> = {
   get_decision: "Reading a decision",
   queue: "Checking the queue",
   show_control: "Finding the right control",
+  commit_to: "Noting what I promised",
+  release_commitment: "Updating what I promised",
+  remember: "Preparing a card for you to confirm",
 };
 
 export function mateToolLabel(name: string): string {

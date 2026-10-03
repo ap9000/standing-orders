@@ -138,6 +138,8 @@ describe("the mate's turn", () => {
     expect(MATE_CONTRACT).toContain("Do not ask the operator for a title, paths, implementation details, acceptance wording, model, budget");
     expect(MATE_CONTRACT).toContain("use your judgment");
     expect(MATE_CONTRACT).toContain("Set propose_task planning to 'required'");
+    expect(MATE_CONTRACT).toContain("call commit_to in the same turn");
+    expect(MATE_CONTRACT).toContain("call remember at once");
   });
 
   test("the organisation policy stops a chat on a provider or model it doesn't allow, before anything is admitted or sent", async () => {
