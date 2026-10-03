@@ -29,7 +29,8 @@ export function browserWorkActionHref(item: WorkIndexItem): string | null {
   return `/t/${encodeURIComponent(item.rootId)}?version=${encodeURIComponent(taskId)}` + anchor;
 }
 
-/** Render an already-admitted page without repeating its database query. */
+/** Render an already-admitted page without repeating its database query. Every task reads its one headline, the
+ * same words as the Tasks list, task page and result page. */
 export function browserCrewFromIndex(page: WorkIndexPage, conversationId?: string): { crew: BrowserCrewItem[]; crewTruncated: boolean } {
   const link = (href: string) => conversationId && href.startsWith('/chat?') ? href + '&conversation=' + encodeURIComponent(conversationId) : href;
   const rows = page.items.map(summary => {

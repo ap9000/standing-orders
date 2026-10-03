@@ -2,6 +2,7 @@
  * their exact markup, nonces and page scripts; React only places them. */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Alert } from "./ui/index.js";
+import { localizeTimes } from "../when-html.js";
 
 let renderNoticeQueued = false;
 export function notifyWorkspaceRendered() {
@@ -11,6 +12,8 @@ export function notifyWorkspaceRendered() {
   // every guarded fragment, including the selected result, in the document.
   queueMicrotask(() => {
     renderNoticeQueued = false;
+    // Every time on the page in the viewer's own zone, by the one formatter (when-html.ts).
+    localizeTimes(document);
     window.dispatchEvent(new CustomEvent("standing-orders:workspace-rendered"));
   });
 }

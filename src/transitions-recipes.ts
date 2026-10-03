@@ -177,22 +177,18 @@ export const TRANSITIONS_CSS = `
     opacity var(--acc-expand) var(--acc-ease),
     filter var(--acc-expand) var(--acc-ease);
 }
-/* Flip the chevron vertically to turn the "v" into a "^".
-   scaleY(-1) about the centre passes through a flat line at
-   the midpoint (same look as a \`d:\` path morph) but animates
-   in every browser, unlike CSS \`d:\` morphing (Chromium only).
-   The chevron path is symmetric about the 16x16 viewBox
-   centre, so the flip lands exactly on the "^"; non-scaling
-   -stroke keeps the stroke width constant through the flip. */
+/* The one disclosure glyph (disclosure.ts): a right chevron that
+   turns down when the fold opens; non-scaling-stroke keeps the
+   stroke width constant through the turn. */
 .t-acc-chevron {
   display: inline-flex;
-  transform: scaleY(1);
+  transform: rotate(0deg);
   transform-origin: center;
   transition: transform var(--acc-chevron) var(--acc-ease);
 }
 .t-acc-chevron path { vector-effect: non-scaling-stroke; }
 .t-acc[data-open="true"] .t-acc-chevron {
-  transform: scaleY(-1);
+  transform: rotate(90deg);
 }
 
 @media (prefers-reduced-motion: reduce) {

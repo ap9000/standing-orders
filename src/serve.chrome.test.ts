@@ -11,7 +11,7 @@ import type { Server } from "node:http";
 import { openStore, type Store } from "./store.js";
 import { acquire } from "./claim.js";
 import { register } from "./runner.js";
-import { addApprover, approve } from "./scope.js";
+import { addApprover, approve, propose } from "./scope.js";
 import { storeEvidence } from "./evidence.js";
 import { createDecisionServer, SENSITIVE_INPUT } from "./serve.js";
 import { presented, T0, stylesOf, workspaceOf } from "../test/serve-kit.js";
@@ -91,7 +91,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const tools = /<details class="nav-group" data-group="tools"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
     const settings = /<details class="nav-group" data-group="settings"[^>]*>(.*?)<\/details>/s.exec(side)?.[1] ?? "";
     expect(tools).not.toContain("/settings");
-    expect(settings).toMatch(/^<summary>settings<svg.*?<nav class="nav-group-items"><a href="\/settings" aria-label="settings" title="settings">settings<\/a>/s);
+    expect(settings).toMatch(/^<summary>Settings<svg.*?<nav class="nav-group-items"><a href="\/settings" aria-label="Settings" title="Settings">Settings<\/a>/s);
     // The phone's overflow drawer mirrors it — its own headed section, last.
     const menu = await (await fetch(url("/menu"), { headers: { cookie } })).text();
     expect(menu).toContain('<h2 class="menu-group-label">Settings</h2>');
@@ -217,7 +217,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     });
     const cookie = await login();
     const pending = await (await fetch(url("/next"), { headers: { cookie } })).text();
-    expect(pending).toContain("approve this scope");
+    expect(pending).toContain("Approve this scope");
     expect(pending).toContain('class="sticky-actions"');
     expect(workspaceOf(pending).sensitive).toBe(true);
     expect(pending).not.toContain('id="palette-index"');
@@ -225,7 +225,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const granted = approve(store, "t-a", "alex", T0, store.getScope("t-a")?.digest as string, approverToken);
     expect(granted.ok).toBe(true);
     const clear = await (await fetch(url("/next"), { headers: { cookie } })).text();
-    expect(clear).not.toContain("approve this scope");
+    expect(clear).not.toContain("Approve this scope");
     expect(workspaceOf(clear).sensitive).toBe(false);
   });
 
@@ -257,10 +257,12 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     expect(approveForm).toContain('<ul class="approval-done"><li>The payout guard rejects a negative amount.</li><li>The settings panel still opens.</li></ul>');
     const rows = approveForm.slice(0, approveForm.indexOf('<details class="approval-details">'));
     expect(rows).not.toMatch(/\bc[12]\b|requires:/);
-    expect(approveForm).toContain('<code>c1</code> The payout guard rejects a negative amount. <span class="meta">needs check</span>');
-    expect(approveForm).toContain('<code>c2</code> The settings panel still opens. <span class="meta">needs screenshot</span>');
-    // No competing primary: exactly one submit button inside the ceremony form.
-    expect((approveForm.match(/<button type="submit"/g) ?? []).length).toBe(1);
+    expect(approveForm).toContain('<code>c1</code> The payout guard rejects a negative amount. <span class="meta">shown by the project check</span>');
+    expect(approveForm).toContain('<code>c2</code> The settings panel still opens. <span class="meta">shown by screenshots</span>');
+    // No competing primary: exactly one submit button the ceremony form owns
+    // (Edit plan's Save belongs to its own form).
+    expect((approveForm.match(/<button type="submit"(?! form=)/g) ?? []).length).toBe(1);
+    expect(approveForm).toContain('<button type="submit" form="plan-editor-form">Save plan</button>');
     // Advisory `how` never renders inside the ceremony form itself — only
     // in the separate, later scope-EDIT textarea, which legitimately shows
     // it back for editing.
@@ -270,7 +272,7 @@ describe("arc 4 — the chrome layer, sensitivity, and motion contracts", () => 
     const granted = approve(store, "t-rubric", "alex", T0, store.getScope("t-rubric")?.digest as string, approverToken);
     expect(granted.ok).toBe(true);
     const after = await (await fetch(url("/t/t-rubric"), { headers: { cookie } })).text();
-    const cardAcceptance = after.indexOf(">acceptance<");
+    const cardAcceptance = after.indexOf(">Acceptance<");
     const cardSeal = after.indexOf("approval binds to this exact wording");
     expect(cardAcceptance).toBeGreaterThan(-1);
     expect(cardAcceptance).toBeLessThan(cardSeal);
@@ -690,7 +692,7 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     // Sidebar primary rows carry a drawn icon; the foot's rows stay text.
     expect(html).toMatch(/<a href="\/work"[^>]*><span class="glyph"><svg/);
     expect(html).toMatch(/<a href="\/projects"[^>]*><span class="glyph"><svg/);
-    expect(html).toMatch(/<a href="\/workbench" aria-label="portfolio" title="portfolio">portfolio<\/a>/);
+    expect(html).toMatch(/<a href="\/workbench" aria-label="Portfolio" title="Portfolio">Portfolio<\/a>/);
     // Section headers speak sans; status labels are quiet rounded rectangles,
     // while numeric counts retain the conventional pill silhouette.
     expect(css).toContain("color: var(--muted-foreground); margin: 2rem 0 .5rem; font-family: var(--font-sans);");
@@ -727,7 +729,7 @@ describe("the phone shell (mobile pass): one header row, drawn controls, thumb-s
     expect(pill).toMatch(/<span class="pill-status">.*needs you.*live.*queued.*<\/span>/s);
     const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
     const wide = /<details class="project-pill switcher"><summary>(.*?)<\/summary>/s.exec(portfolio)?.[1] ?? "";
-    expect(wide).toContain('<span class="name">all projects<svg');
+    expect(wide).toContain('<span class="name">All projects<svg');
     expect(wide).not.toContain("pill-status");
   });
 
@@ -831,8 +833,8 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     const cookie = await login();
     const board = await (await fetch(url("/board?scope=all"), { headers: { cookie } })).text();
     const bar = board.slice(board.indexOf('<div class="scope-bar">'), board.indexOf("<main>"));
-    expect(bar).toContain('<summary class="name">all projects<svg');
-    expect(bar).toContain('<button type="submit" class="current" aria-current="true">all projects</button>');
+    expect(bar).toContain('<summary class="name">All projects<svg');
+    expect(bar).toContain('<button type="submit" class="current" aria-current="true">All projects</button>');
     for (const repo of [repoA, repoB]) {
       expect(bar).toContain(`<form method="post" action="/projects/open"><input type="hidden" name="csrf" value="${csrfOf(board)}"><input type="hidden" name="return" value="/board?scope=all"><input type="hidden" name="path" value="${repo}"><button type="submit">${repo.split("/").pop()}</button></form>`);
     }
@@ -857,7 +859,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     expect(response.headers.get("content-security-policy") ?? "").toContain("connect-src 'self'");
     const before = await response.text();
     expect(before).toContain("<h1>Chat</h1>");
-    expect(before).toMatch(/<span class="name">all projects/);
+    expect(before).toMatch(/<span class="name">All projects/);
     expect(before).not.toContain("<h1>projects</h1>");
 
     const csrf = csrfOf(before);
@@ -933,8 +935,8 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     store.placeTask(store.refFor("built-in", "t-a").id, repoA);
     const portfolio = await (await fetch(url("/workbench"), { headers: { cookie } })).text();
     const card = /<div class="workspace-card hot">.*?<div class="workspace-bar" aria-hidden="true">.*?<\/div><\/div>/s.exec(portfolio)?.[0] ?? "";
-    expect(card).toContain('<span class="workspace-name">alpha</span><span class="badge badge-open">needs you</span>');
-    expect(card).toContain(`<input type="hidden" name="path" value="${repoA}"><input type="hidden" name="return" value="/board"><button type="submit">board →</button>`);
+    expect(card).toContain('<span class="workspace-name">alpha</span><span class="badge badge-open">Needs you</span>');
+    expect(card).toContain(`<input type="hidden" name="path" value="${repoA}"><input type="hidden" name="return" value="/board"><button type="submit">Board →</button>`);
     expect(card).toContain('<span class="pulse-stat hot"><b>1</b> need you</span>');
     expect(card).toContain('<span class="seg attention" style="flex-grow:1"></span>');
     expect(card).not.toContain('class="seg building"');
@@ -974,29 +976,36 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     // The plan is open in its own section: no opener, no "approve exactly this".
     expect(page).toContain('<section class="task-plan-review" aria-label="Approve the plan"><form method="post" action="/t/t-yes/approve"');
     expect(page).not.toContain('<span class="button-link">Approve plan</span></summary>');
-    expect(page).not.toContain("approve exactly this:");
+    expect(page).not.toContain("Approve exactly this:");
     // Plain rows, then who builds, then the one act, its after-line and the secondary acts; Details last.
     const rows = page.indexOf('<dl class="approval-rows">');
     const confirm = page.indexOf('<div class="approval-act" id="approval-confirm">');
-    const details = page.indexOf('<details class="approval-details"><summary>Details</summary>');
+    const details = page.indexOf('<details class="approval-details"><summary>Plan details</summary>');
     expect(rows).toBeGreaterThan(ceremony);
     expect(confirm).toBeGreaterThan(rows);
     expect(details).toBeGreaterThan(confirm);
-    expect(page.slice(ceremony, page.indexOf("</form>", ceremony)).match(/<button type="submit"/g)).toHaveLength(1);
+    expect(page.slice(ceremony, page.indexOf("</form>", ceremony)).match(/<button type="submit"(?! form=)/g)).toHaveLength(1);
     expect(page).toContain('<button type="submit" data-primary-action>Approve & start</button></div><p class="approval-after">An agent starts in its own branch. You&#39;ll hear when it&#39;s ready to review.</p>'.replace(/&#39;/g, "'"));
-    expect(page).toContain('<a class="approval-link" href="#scope">Edit plan</a><a class="approval-link" href="/work">Not now</a>');
+    // Edit plan opens the rows for editing in place, saved through the scope's own route.
+    expect(page).toContain('<div class="approval-secondary"><details class="approval-edit" id="plan-editor"><summary class="approval-link"><span class="approval-edit-open">Edit plan</span><span class="approval-edit-close">Cancel</span></summary>');
+    expect(page).toContain('</details><a class="approval-link" href="/work">Not now</a></div>');
+    expect(page).toContain('<form method="post" action="/t/t-yes/scope" id="plan-editor-form" class="approval-editor-form">');
+    // What the yes allows sits right above it, and the password says why it is asked.
+    expect(page).toContain('<p class="approval-allowing" data-approval-allowing>You’re allowing: ');
+    expect(page.indexOf("data-approval-allowing")).toBeLessThan(confirm);
+    expect(page).toContain('<p class="approval-password-note" id="approval-password-note">Your password signs this approval.</p>');
     expect(page.slice(rows, confirm)).toContain('<div class="approval-row"><dt>Goal</dt><dd><p class="approval-goal">the goal</p></dd></div>');
     expect(page.slice(rows, confirm)).toContain('<ul class="approval-paths"><li><span class="mono">src/a.ts</span></li></ul>');
     expect(page.slice(rows, confirm)).toContain("<dt>Won’t touch</dt><dd><p>not that</p></dd>");
     // No hashes in the main view: the seal is in Details.
-    expect(page.slice(ceremony, details)).not.toContain("signs ");
+    expect(page.slice(ceremony, details)).not.toContain('class="seal');
     expect(page.slice(details, page.indexOf("</form>", details))).toContain("<h3>Seal</h3>");
     // The recipe road rides with the scope section, off the title-to-action path.
     expect(page.indexOf("Reuse this scope as a recipe")).toBeGreaterThan(page.indexOf('<details class="section" id="scope"'));
     // Both views stay one tap apart.
     expect(page).toContain('<a href="/t/t-yes" class="active" aria-current="page">Overview</a><a href="/chat?task=t-yes">Ask</a>');
     expect(page).toContain('name="username" autocomplete="username" class="visually-hidden"');
-    expect(page).toContain('<details class="section" id="scope"><summary><h2>scope</h2></summary>');
+    expect(page).toContain('<details class="section" id="scope"><summary><h2>Scope</h2></summary>');
     // No other act wears primary while the ceremony leads; the old
     // "needs your approval" card is gone (the ceremony says it).
     expect(page.slice(bar, page.indexOf("</div>", bar))).not.toContain('class="primary"');
@@ -1008,7 +1017,7 @@ describe("the project switcher (board pass): one tap from any screen, forms with
     const nextSection = page.indexOf('<details class="section"', scopeStart + 1);
     const scopeSection = page.slice(scopeStart, nextSection === -1 ? page.length : nextSection);
     expect(scopeSection).not.toContain('action="/t/t-yes/approve"');
-    expect(scopeSection).toContain("edit the scope");
+    expect(scopeSection).toContain("Edit the scope");
 
     // A scope the store could not resolve to a routing gets the fix road,
     // never a password it cannot use.
@@ -1025,6 +1034,136 @@ describe("the project switcher (board pass): one tap from any screen, forms with
       expect(fix).toContain('<a class="button-link" href="#scope">edit the scope to fix it →</a>');
       expect(fix).not.toContain('action="/t/t-fix/approve"');
     }
+  });
+
+  test("Edit plan edits the goal, changes, won't-touch and done-when in place; the edited plan then approves with the password", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    await fetch(url("/projects/open"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf: csrfOf(home), path: repoA, return: "/" }), redirect: "manual" });
+    store.createTask({ id: "t-edit", title: "edit in place" }, T0);
+    store.placeTask(store.refFor("built-in", "t-edit").id, repoA);
+    propose(store, {
+      taskId: "t-edit", goal: "guard the payout path", outOfScope: "billing", touches: ["src/payout.ts"], budgetMicrousd: 1_500_000, now: T0,
+      acceptance: [
+        { id: "c1", statement: "Negative payouts are refused.", how: "unit test it", evidence: ["check"] },
+        { id: "c2", statement: "The settings panel opens.", how: null, evidence: ["screenshot"] },
+        { id: "c3", statement: "Refusals are logged.", how: "read the log", evidence: ["check"] },
+      ],
+    });
+    const before = store.getScope("t-edit")!;
+    const page = await (await fetch(url("/t/t-edit"), { headers: { cookie } })).text();
+    // Edit plan starts folded; arriving to edit (chat's Edit plan) opens it.
+    expect(page).toContain('<details class="approval-edit" id="plan-editor"><summary');
+    expect(await (await fetch(url("/t/t-edit?edit=plan"), { headers: { cookie } })).text()).toContain('<details class="approval-edit" id="plan-editor" open><summary');
+    // No written steps on this plan, so no steps link.
+    expect(page).not.toContain(">Edit steps</a>");
+    // The plain consent line, the password's reason, and the in-place editor.
+    expect(page).toContain("You’re allowing: file edits and routine commands; anything risky stops · up to $1.50 per attempt</p>");
+    expect(page).not.toContain("data-approval-you-check");
+    expect(page).toContain("Your password signs this approval.");
+    const editor = page.slice(page.indexOf('<details class="approval-edit" id="plan-editor">'), page.indexOf('<details class="approval-details">'));
+    expect(editor).toContain('<textarea name="goal" rows="3" form="plan-editor-form">guard the payout path</textarea>');
+    expect(editor).toContain('<textarea name="touches" rows="2" form="plan-editor-form">src/payout.ts</textarea>');
+    expect(editor).toContain('<textarea name="not" rows="2" form="plan-editor-form">billing</textarea>');
+    expect(editor).toContain('<input type="text" name="requirement" value="Negative payouts are refused." aria-label="Requirement 1" form="plan-editor-form">');
+    expect(editor).not.toContain("unit test it");
+    // Submit exactly what the editor's form carries, with the fields edited.
+    const editorForm = page.slice(page.indexOf('<form method="post" action="/t/t-edit/scope" id="plan-editor-form"'));
+    const hidden = [...editorForm.slice(0, editorForm.indexOf("</form>")).matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!] as [string, string]);
+    expect(Object.fromEntries(hidden)).toMatchObject({ sawDigest: before.digest, "permission-mode": "auto", "quality-mode": before.qualityMode ?? "default", "budget-microusd": "1500000" });
+    expect(Object.keys(Object.fromEntries(hidden))).not.toContain("budget-usd");
+    const edit = (fields: [string, string][]) => fetch(url("/t/t-edit/scope"), { method: "POST", headers: { cookie }, body: new URLSearchParams([...hidden, ...fields]), redirect: "manual" });
+    // Every requirement cleared: refused, and the editor reopens with the draft and why.
+    const refused = await edit([["goal", "guard it harder"], ["touches", ""], ["not", ""], ["requirement", ""], ["requirement", ""], ["requirement", ""], ["requirement-new", ""]]);
+    expect(refused.status).toBe(400);
+    const refusedPage = await refused.text();
+    expect(refusedPage).toContain('<details class="approval-edit" id="plan-editor" open>');
+    expect(refusedPage).toContain('<p class="problem" role="alert">Not saved: add at least one requirement under Done when.</p>');
+    expect(refusedPage).toContain('<textarea name="goal" rows="3" form="plan-editor-form">guard it harder</textarea>');
+    expect(store.getScope("t-edit")?.digest).toBe(before.digest);
+    const saved = await edit([
+      ["goal", "guard the payout path and log refusals"], ["touches", "src/payout.ts\nsrc/log.ts"], ["not", "billing and sign-in"],
+      ["requirement", "Negative and zero payouts are refused."], ["requirement", ""], ["requirement", " Refusals are  logged. "], ["requirement-new", "The refusal reads plainly"],
+    ]);
+    expect(saved.status).toBe(303);
+    const after = store.getScope("t-edit")!;
+    expect(after).toMatchObject({ goal: "guard the payout path and log refusals", touches: ["src/payout.ts", "src/log.ts"], outOfScope: "billing and sign-in", budgetMicrousd: 1_500_000, qualityMode: before.qualityMode, approvedAt: null });
+    // Ids kept by position; an unchanged one keeps its evidence and guidance; a rewritten one
+    // drops them and, like an added one, is yours to check; the cleared one is dropped.
+    expect(after.acceptance).toEqual([
+      { id: "c1", statement: "Negative and zero payouts are refused.", how: null, evidence: ["manual-review"] },
+      { id: "c3", statement: "Refusals are logged.", how: "read the log", evidence: ["check"] },
+      { id: "c4", statement: "The refusal reads plainly", how: null, evidence: ["manual-review"] },
+    ]);
+    expect(after.profile).toMatchObject({ provider: "claude", permissionArgv: "auto" });
+    expect(after.digest).not.toBe(before.digest);
+    // The seal is unchanged: the new wording approves only through the password ceremony, bound to its digest.
+    const edited = await (await fetch(url("/t/t-edit"), { headers: { cookie } })).text();
+    expect(edited).toContain('<p class="approval-you-check" data-approval-you-check>You’ll check: Negative and zero payouts are refused; The refusal reads plainly</p>');
+    const nonce = /name="nonce" value="([0-9a-f]+)"/.exec(edited)?.[1] ?? "";
+    const digest = /name="digest" value="([0-9a-f]+)"/.exec(edited)?.[1] ?? "";
+    expect(digest).toBe(after.digest);
+    const approved = await fetch(url("/t/t-edit/approve"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf: csrfOf(edited), nonce, digest, token: approverToken }), redirect: "manual" });
+    expect(approved.status).toBe(303);
+    expect(store.getScope("t-edit")).toMatchObject({ approvedDigest: after.digest, approvedBy: "alex" });
+  });
+
+  test("Edit plan in place keeps what it doesn't show: a stale draft stays stale, permissions never change, the cap round-trips exactly", async () => {
+    const cookie = await login();
+    const home = await (await fetch(url("/inbox"), { headers: { cookie } })).text();
+    await fetch(url("/projects/open"), { method: "POST", headers: { cookie }, body: new URLSearchParams({ csrf: csrfOf(home), path: repoA, return: "/" }), redirect: "manual" });
+    store.createTask({ id: "t-keep", title: "keep the terms" }, T0);
+    store.placeTask(store.refFor("built-in", "t-keep").id, repoA);
+    const acceptance = [{ id: "c1", statement: "Negative payouts are refused.", how: null, evidence: ["check" as const] }];
+    propose(store, { taskId: "t-keep", goal: "guard the payout path", acceptance, now: T0 });
+    const editorOf = async () => {
+      const page = await (await fetch(url("/t/t-keep"), { headers: { cookie } })).text();
+      const form = page.slice(page.indexOf('<form method="post" action="/t/t-keep/scope" id="plan-editor-form"'));
+      return { page, hidden: [...form.slice(0, form.indexOf("</form>")).matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!] as [string, string]) };
+    };
+    const save = (hidden: [string, string][], goal: string) => fetch(url("/t/t-keep/scope"), { method: "POST", headers: { cookie },
+      body: new URLSearchParams([...hidden, ["goal", goal], ["touches", ""], ["not", ""], ["requirement", "Negative payouts are refused."], ["requirement-new", ""]]), redirect: "manual" });
+
+    // No limit stays no limit; an odd cap comes back to the millionth.
+    const open = await editorOf();
+    expect(open.page).toContain(" · no attempt limit</p>");
+    expect(Object.fromEntries(open.hidden)["budget-microusd"]).toBe("none");
+    expect((await save(open.hidden, "guard the payout path, plainly")).status).toBe(303);
+    expect(store.getScope("t-keep")?.budgetMicrousd).toBeNull();
+    propose(store, { taskId: "t-keep", goal: "guard the payout path", acceptance, budgetMicrousd: 1_234_567, now: T0 });
+    const capped = await editorOf();
+    expect(Object.fromEntries(capped.hidden)["budget-microusd"]).toBe("1234567");
+    expect((await save(capped.hidden, "guard the payout path, again")).status).toBe(303);
+    expect(store.getScope("t-keep")?.budgetMicrousd).toBe(1_234_567);
+
+    // A draft edited from an older version is refused, and stays bound to
+    // that version when it reopens: saving it again is refused again.
+    const stale = await editorOf();
+    propose(store, { taskId: "t-keep", goal: "someone else's wording", acceptance, now: T0 });
+    const current = store.getScope("t-keep")!.digest;
+    const refused = await save(stale.hidden, "my wording");
+    expect(refused.status).toBe(409);
+    const reopened = await refused.text();
+    expect(reopened).toContain('<details class="approval-edit" id="plan-editor" open>');
+    const retried = /<form method="post" action="\/t\/t-keep\/scope" id="plan-editor-form"[^]*?<\/form>/.exec(reopened)?.[0] ?? "";
+    const again = [...retried.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map(one => [one[1]!, one[2]!] as [string, string]);
+    expect(Object.fromEntries(again)["sawDigest"]).toBe(Object.fromEntries(stale.hidden)["sawDigest"]);
+    expect(Object.fromEntries(again)["sawDigest"]).not.toBe(current);
+    expect((await save(again, "my wording")).status).toBe(409);
+    expect(store.getScope("t-keep")).toMatchObject({ goal: "someone else's wording", digest: current });
+
+    // A legacy accept-edits plan: saving in place never raises what the agent may do.
+    const resolved = store.getScope("t-keep")!.profile!;
+    if (resolved.provider !== "claude") throw new Error("expected a claude profile");
+    propose(store, { taskId: "t-keep", goal: "guard the payout path", acceptance, now: T0, profile: { ...resolved, permissionArgv: "acceptEdits" } });
+    const legacy = store.getScope("t-keep")!;
+    expect(legacy.profile).toMatchObject({ permissionArgv: "acceptEdits" });
+    const kept = await editorOf();
+    expect(kept.page).toContain("You’re allowing: file edits only; commands are refused");
+    const raised = await save(kept.hidden, "guard the payout path, edited");
+    expect(raised.status).toBe(409);
+    expect(await raised.text()).toContain("Not saved: this would change what the agent may do.");
+    expect(store.getScope("t-keep")).toMatchObject({ goal: "guard the payout path", digest: legacy.digest, profile: { permissionArgv: "acceptEdits" } });
   });
 
   test("a sensitive page renders the switcher inert: the name and the one link, no forms in the chrome", async () => {
@@ -1130,30 +1269,30 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     const settings = /<details class="nav-group" data-group="settings"([^>]*)>(.*?)<\/details>/s.exec(side);
     expect(tools?.[1]).toBe(" open");
     expect(settings?.[1]).toBe("");
-    expect(tools?.[2]).toContain("<summary>work tools");
-    expect(settings?.[2]).toContain("<summary>settings");
+    expect(tools?.[2]).toContain("<summary>Work tools");
+    expect(settings?.[2]).toContain("<summary>Settings");
     const toolRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(tools?.[2] ?? "")?.[1] ?? "";
     const settingsRows = /<nav class="nav-group-items">(.*?)<\/nav>/s.exec(settings?.[2] ?? "")?.[1] ?? "";
     expect([...toolRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
       "Coding sessions /code",
-      "inbox /inbox",
-      "board /board",
-      "task list /tasks",
-      "recipes /recipes",
-      "routines /routines",
-      "portfolio /workbench",
-      "action ledger /ledger",
-      "spend /spend",
+      "Inbox /inbox",
+      "Board /board",
+      "Task list /tasks",
+      "Recipes /recipes",
+      "Routines /routines",
+      "Portfolio /workbench",
+      "Action ledger /ledger",
+      "Spend /spend",
     ]);
     // Settings is the group's first row only where the console offers it
     // Learning is available even without a telegram token file.
     expect([...settingsRows.matchAll(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g)].map(m => `${m[2]} ${m[1]}`)).toEqual([
-      "settings /settings",
-      "fleet /fleet",
-      "requirements /caps",
-      "people /people",
-      "operating mode /mode",
-      "system /system",
+      "Settings /settings",
+      "Fleet /fleet",
+      "Requirements /caps",
+      "People /people",
+      "Operating mode /mode",
+      "System /system",
     ]);
     // The group rows stay text, the way Linear's does — only the rail's
     // primary rows and the chevrons wear a drawn icon.
@@ -1206,7 +1345,7 @@ describe("the reduction pass (Laws of UX): five always-visible rows and two acco
     }
     const order = await (await fetch(url("/board?view=order"), { headers: { cookie } })).text();
     expect(order).toContain('<a href="/work" aria-label="Tasks" title="Tasks" class="active" aria-current="page"');
-    expect(order).toContain('<a href="/board" aria-label="board" title="board" class="active">');
+    expect(order).toContain('<a href="/board" aria-label="Board" title="Board" class="active">');
   });
 
   test("every count is a road: the header's counts, and a project card's name and chips, open what they count", async () => {

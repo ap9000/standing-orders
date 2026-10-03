@@ -101,6 +101,8 @@ describe("console v2: the thread, Details, the home and the Inbox tabs keep ever
     view.statusHtml, view.approval, view.questions, ...view.lead.map(one => one.html),
     ...(view.thread ?? []).flatMap(one => [one.html, one.more?.html ?? ""]),
     ...view.sections.map(one => one.html), ...view.manage.map(one => one.html), view.cancel?.html ?? "",
+    // Stop on the Building card is rendered from data, not HTML.
+    view.stop == null ? "" : `<form method="post" action="${view.stop.action}">`,
   ].join("\n");
   const formsOf = (html: string): string[] => [...html.matchAll(/<form\b[^>]*\baction="([^"]+)"/g)].map(match => match[1]!).sort();
   const stepUps = (html: string): number => (html.match(/type="password"/g) ?? []).length;
@@ -220,16 +222,16 @@ describe("console v2: the thread, Details, the home and the Inbox tabs keep ever
     const allHtml = await all.text();
     expect(all.headers.get("set-cookie")).toMatch(/^so-inbox-seen=[0-9a-f]{8}(\.[0-9a-f]{8}){3};/);
     for (const tab of ["needs-you", "ready", "running", "all"]) expect(allHtml).toContain(`href="/inbox?tab=${tab}"`);
-    expect(allHtml).toContain("approve a scope");
-    expect(allHtml).toContain("running now");
+    expect(allHtml).toContain("Approve a scope");
+    expect(allHtml).toContain("Running now");
     const running = await (await fetch(url("/inbox?tab=running"), { headers: { cookie } })).text();
-    expect(running).toContain("running now");
-    expect(running).not.toContain("approve a scope");
+    expect(running).toContain("Running now");
+    expect(running).not.toContain("Approve a scope");
     const needs = await (await fetch(url("/inbox?tab=needs-you"), { headers: { cookie } })).text();
-    expect(needs).toContain("approve a scope");
-    expect(needs).not.toContain("running now");
+    expect(needs).toContain("Approve a scope");
+    expect(needs).not.toContain("Running now");
     // Needs you groups by the ask: a plan to approve is under Decide, with its count.
-    expect(needs).toMatch(/<section class="inbox-ask" data-ask="decide"><h2>Decide <span class="count">1<\/span><\/h2><h3>approve a scope<\/h3>/);
+    expect(needs).toMatch(/<section class="inbox-ask" data-ask="decide"><h2>Decide <span class="count">1<\/span><\/h2><h3>Approve a scope<\/h3>/);
     // A tab that changed since this browser looked wears a dot (phones show it).
     const seen = (all.headers.get("set-cookie") ?? "").split(";")[0]!;
     filed("waiting-2", "Show the points", T0, false);

@@ -4,14 +4,16 @@
  * in a Details panel beside it (a Details sheet on a phone). Forms,
  * ceremonies and ledgers stay the server's own HTML (same ids, same page
  * scripts); this page only frames them. */
-import { ArrowRight, Check, ChevronRight, CircleDot, FilePlus2, ListChecks, MessageCircleQuestion, Repeat, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronRight, CircleDot, FilePlus2, ListChecks, MessageCircleQuestion, Repeat, X } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import type { AssignmentCard } from "../../assignment-ui.js";
 import type { BrowserTaskDetailGroup, BrowserTaskFact, BrowserTaskSection, BrowserTaskThreadItem, BrowserTaskView } from "../../browser-workspace.js";
 import { GuardedHtml } from "../guarded-html.js";
 import { Journey } from "../first-run.js";
-import { Badge, Button, Card, Input, cn } from "../components/ui/index.js";
+import { Badge, Button, Card, Textarea, cn } from "../components/ui/index.js";
 import { ConfirmStoppedForm, RebuildForm, StatusDetails, StatusHeadline, StatusWhy } from "./status-summary.js";
+import { RETRY_NOTE_LIMIT } from "../../needs-you.js";
+import { fullWhen, shortWhen, viewerZone } from "../../when-html.js";
 
 /** A link to a fold (#scope, #holds, #task-actions) opens it and every fold
  * around it, on arrival and on in-page links alike. */
@@ -38,46 +40,98 @@ function Html({ html, className }: { html: string; className?: string }) {
   return <GuardedHtml html={html} immutable {...(className === undefined ? {} : { className })} />;
 }
 
-/** Retry itself, on the failed card: the task page's requeue (branch and workspace kept), with an optional note for the next attempt. */
-function RetryForm({ action, csrf }: { action: string; csrf: string }) {
-  return <form method="post" action={action} data-retry className="flex flex-wrap items-center gap-2 phone:w-full">
+/** Retry itself, on the failed card: the task page's requeue (branch and workspace kept), its note for the next
+ * attempt starting with the one suggestion of what to change, ready to edit. */
+export function RetryForm({ action, csrf, note, variant = "default" }: { action: string; csrf: string; note?: string | undefined; variant?: "default" | "attention" }) {
+  return <form method="post" action={action} data-retry className="flex w-full flex-col gap-1.5">
     <input type="hidden" name="csrf" value={csrf} />
-    <Input type="text" name="note" maxLength={500} aria-label="Note for the next attempt (optional)" placeholder="Note for the next attempt (optional)" className="h-9 w-64 phone:h-11 phone:w-full" />
-    <Button type="submit" className="phone:w-full" data-primary-action>Retry, keeping the branch and workspace</Button>
+    <label htmlFor="retry-note" className="text-[13px] font-medium">What to change next time</label>
+    {/* The whole suggestion shows, and grows with what the person adds (a single-line field cut it off on a phone). */}
+    <div className="flex flex-wrap items-end gap-2 phone:flex-col phone:items-stretch">
+      <Textarea id="retry-note" name="note" maxLength={RETRY_NOTE_LIMIT} rows={1} defaultValue={note ?? ""} placeholder="Note for the next attempt (optional)" data-retry-note
+        className="min-h-9 min-w-0 flex-1 basis-72 resize-none [field-sizing:content] max-h-40 phone:min-h-11 phone:basis-auto" />
+      <Button type="submit" variant={variant} className="phone:w-full" data-primary-action title="Keeps the branch and workspace">Retry</Button>
+    </div>
+  </form>;
+}
+
+/** What a failed attempt missed: the evidence line behind it, and where to see the build (or that exact log line). */
+function FailureEvidence({ failure }: { failure: NonNullable<BrowserTaskView["failure"]> }) {
+  if (failure.evidence === null && failure.link === null) return null;
+  return <p className="mt-1 text-[13px] text-muted-foreground phone:leading-[1.35]" data-failure-evidence>
+    {failure.evidence !== null && <span className="[overflow-wrap:anywhere]">{failure.evidence}</span>}
+    {failure.link !== null && <>{failure.evidence !== null && " "}<a href={failure.link.href} data-failure-log className="whitespace-nowrap font-medium text-foreground/80 underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:-my-3 phone:inline-block phone:py-3">{failure.link.label}</a></>}
+  </p>;
+}
+
+/** Stop, on the Building card: the same exact-run stop form the control card posts. */
+function StopForm({ stop, csrf }: { stop: NonNullable<BrowserTaskView["stop"]>; csrf: string }) {
+  return <form method="post" action={stop.action} className="task-stop-form phone:w-full" data-task-control="stop" data-control-run={stop.run}>
+    <input type="hidden" name="csrf" value={csrf} />
+    <input type="hidden" name="run" value={stop.run} />
+    <input type="hidden" name="return" value="task" />
+    <Button type="submit" variant="destructive" className="phone:w-full" data-stop-build>Stop</Button>
   </form>;
 }
 
 /** One headline, one sentence and one action; the details sit quietly
  * underneath (task-status.ts). Only Failed wears vermilion: its dot and, at
- * half strength, its border; its sentence is what went wrong, with the log
- * lines one tap away. */
-function StatusCard({ card, confirm, rebuild, retry, failure, csrf }: { card: AssignmentCard; confirm: BrowserTaskView["confirmStopped"]; rebuild: BrowserTaskView["rebuild"];
-  retry: BrowserTaskView["retry"]; failure: BrowserTaskView["failure"]; csrf: string }) {
+ * half strength, its border; its sentence is what it missed, the evidence
+ * one line under it, and Retry's note starts with what to change. A live
+ * build says the step it is on; a stuck step takes that line's place, with
+ * its act beside it, its record is one quiet link under it, and Stop sits
+ * in the same card; the attempts that
+ * stopped before it are one quiet line at the bottom. */
+function StatusCard({ view, card, csrf }: { view: BrowserTaskView; card: AssignmentCard; csrf: string }) {
   const failed = card.status.headline === "Failed";
+  const confirm = view.confirmStopped ?? null, rebuild = view.rebuild ?? null, retry = view.retry ?? null, failure = view.failure ?? null;
+  const stuck = view.progress?.stuck ?? null;
+  const retrying = failed && retry != null && csrf !== "";
   return <Card data-task-status data-work-status={card.token} data-headline={card.status.headline} aria-label="Task status" className={cn(failed && "border-destructive/50")}>
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3 phone:gap-y-2.5">
       <div className="min-w-0 flex-1 basis-64">
         <StatusHeadline status={card.status} />
-        <p className="mt-1.5 text-sm text-muted-foreground phone:mt-1 phone:leading-[1.35]" {...(failed ? { "data-failure-reason": "" } : {})}>
+        {/* A stuck step is the one thing a person may help with: it replaces the step line, said plainly, its act beside it. */}
+        <p className={cn("mt-1.5 text-sm phone:mt-1 phone:leading-[1.35]", failed || stuck !== null ? "text-foreground" : "text-muted-foreground", stuck !== null && "flex gap-2")}
+          {...(failed ? { "data-failure-reason": "" } : {})} {...(view.progress != null ? { "data-build-progress": "" } : {})} {...(stuck !== null ? { "data-build-stuck": stuck.step } : {})}>
+          {stuck !== null && <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />}
           <span className="[overflow-wrap:anywhere]">{card.status.sentence}</span>
-          {failed && failure?.link != null && <> <a href={failure.link.href} data-failure-log className="whitespace-nowrap font-medium text-foreground/80 underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:-my-3 phone:inline-block phone:py-3">{failure.link.label}</a></>}
         </p>
+        {view.record != null && <p className="mt-1 text-[13px]">
+          <a href={view.record.href} data-build-record className="text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-muted-foreground phone:inline-flex phone:min-h-11 phone:items-center">{view.record.label}</a>
+        </p>}
+        {failed && failure != null && <FailureEvidence failure={failure} />}
+        {failed && failure != null && !retrying && <p className="mt-1 text-[13px] text-muted-foreground" data-failure-suggestion>What to change: {failure.suggestion}</p>}
       </div>
       {/* Confirm it stopped asks for the password right here, in place of a link. */}
       {confirm != null && csrf !== "" ? <ConfirmStoppedForm form={confirm} csrf={csrf} label={card.action?.label ?? "Confirm it stopped"} />
         : rebuild != null && csrf !== "" ? <RebuildForm action={rebuild.action} csrf={csrf} label={card.action?.label ?? "Build again"} />
-        : retry != null && csrf !== "" ? <RetryForm action={retry.action} csrf={csrf} />
+        : retrying ? null
+        : stuck?.action != null || view.stop != null ? <div className="flex flex-wrap items-center gap-2 phone:w-full phone:flex-col phone:items-stretch">
+            {stuck?.action != null ? <Button asChild variant="outline" className="phone:w-full"><a href={stuck.action.href} data-stuck-action>{stuck.action.label}</a></Button>
+              : card.action !== null && <Button asChild variant="outline" className="phone:w-full"><a href={card.action.href} data-primary-action>{card.action.label}<ArrowRight /></a></Button>}
+            {view.stop != null && csrf !== "" && <StopForm stop={view.stop} csrf={csrf} />}
+          </div>
         : card.action !== null && <Button asChild variant={card.status.headline === "Needs you" ? "attention" : "default"} className="phone:w-full">
         <a href={card.action.href} data-primary-action {...(card.action.openResult ? { "data-open-result": "" } : {})}>{card.action.label}<ArrowRight /></a>
       </Button>}
     </div>
-    <StatusDetails status={card.status} />
+    {retrying && <RetryForm action={retry.action} csrf={csrf} note={retry.note ?? failure?.suggestion} />}
+    <StatusDetails status={card.status} runChecks={view.runChecks ?? null} csrf={csrf} />
     {(card.notices !== null || card.reasons.length > 0 || card.diagnostics.length > 0 || card.status.why.length > 0 || card.status.details.some(one => one.why !== null)) &&
       <div className="flex flex-col gap-1 border-t border-border pt-3 text-[13px] phone:pt-2 phone:leading-[1.35]">
       <StatusWhy status={card.status} extra={[...card.reasons, ...card.diagnostics.map(one => `${one.label} · ${one.detail}`)]} />
       {card.notices !== null && <Fold summary={card.notices.summary} quiet>
         {card.notices.lines.map(line => <p key={line} className="text-muted-foreground">{line}</p>)}
       </Fold>}
+    </div>}
+    {view.earlier != null && <div className="border-t border-border pt-1 text-[13px]" data-earlier-attempts={view.earlier.attempts.length}>
+      <Fold summary={view.earlier.summary} quiet>
+        <ul className="flex flex-col gap-1.5">{view.earlier.attempts.map(one => <li key={one.href} className="text-muted-foreground">
+          <a href={one.href} className="font-medium text-foreground/80 underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:inline-flex phone:min-h-11 phone:items-center">{one.label}</a>
+          {one.text !== null && <> · {one.text}</>}
+        </li>)}</ul>
+      </Fold>
     </div>}
   </Card>;
 }
@@ -96,7 +150,7 @@ function FactValue({ fact }: { fact: BrowserTaskFact }) {
   return <>{fact.parts.map((part, index) => typeof part === "string"
     ? <span key={index}>{part}</span>
     : "at" in part
-      ? <time key={index} dateTime={part.at} title={part.at.slice(0, 16).replace("T", " ")} className="tabular-nums">{threadWhen(part.at)}</time>
+      ? <time key={index} dateTime={part.at} title={whenTitle(part.at)} className="tabular-nums">{threadWhen(part.at)}</time>
     : "seal" in part
       ? <code key={index} className="mr-1 rounded bg-muted px-1.5 py-0.5 font-mono text-xs">{part.seal}</code>
       : <a key={index} href={part.href} className="font-medium underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:relative phone:z-[1] phone:-my-3 phone:inline-flex phone:min-h-11 phone:items-center">{part.label}</a>)}</>;
@@ -119,17 +173,12 @@ function Sections({ sections, label }: { sections: BrowserTaskSection[]; label: 
     : <Card aria-label={label} className="gap-0 divide-y divide-border overflow-hidden p-0 phone:p-0">{sections.map(one => <Section key={one.id} section={one} />)}</Card>;
 }
 
-/** "16:39" today, "Yesterday 16:39", else "Sep 28"; the full stamp in the title. */
+/** "16:39" today, "Yesterday 16:39", else "Sep 28", in the viewer's zone: the one formatter every time on every
+ * surface goes through (when-html.ts); the exact minute in the title (`whenTitle`). */
 export function threadWhen(iso: string, now = new Date()): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return "";
-  const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-  const day = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-  const yesterday = new Date(now.getTime() - 86_400_000);
-  if (day(at) === day(now)) return time;
-  if (day(at) === day(yesterday)) return `Yesterday ${time}`;
-  return at.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return Number.isNaN(new Date(iso).getTime()) ? "" : shortWhen(iso, now, viewerZone());
 }
+export const whenTitle = (iso: string): string => fullWhen(iso, viewerZone());
 
 /** A thread entry's mark: neutral, except the status hues on a live step (blue), a result (green) and a failure (red). */
 function ThreadMark({ item }: { item: BrowserTaskThreadItem }) {
@@ -151,9 +200,10 @@ function ThreadEntry({ item }: { item: BrowserTaskThreadItem }) {
       <p className="flex min-h-6 flex-wrap items-baseline gap-x-2 text-[13px] leading-6">
         <span className="font-medium text-foreground">{item.title}</span>
         {item.author !== "" && <span className="text-muted-foreground">{item.author}</span>}
-        <time dateTime={item.at} title={item.at.slice(0, 16).replace("T", " ")} className="ml-auto text-xs tabular-nums text-muted-foreground">{threadWhen(item.at)}</time>
+        <time dateTime={item.at} title={whenTitle(item.at)} className="ml-auto text-xs tabular-nums text-muted-foreground">{threadWhen(item.at)}</time>
       </p>
-      {item.text !== null && <p className={cn("mt-1 whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]",
+      {/* An entry with no words shows none: never an empty bubble. */}
+      {item.text !== null && item.text.trim() !== "" && <p className={cn("mt-1 whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]",
         item.who === "person" && "w-fit max-w-full rounded-xl bg-[var(--so-user-bubble)] px-3 py-2")}>{item.text}</p>}
       {item.link !== null && <a href={item.link.href} className="mt-1 inline-flex text-[13px] font-medium underline decoration-border underline-offset-4 hover:decoration-muted-foreground phone:min-h-11 phone:items-center">{item.link.label}</a>}
       {item.html !== "" && <div className="mt-2"><Html html={item.html} className="so-thread-card" /></div>}
@@ -265,7 +315,7 @@ export function TaskView({ view, chat = null, details = true, csrf = "" }: { vie
     {view.journey != null && <Journey steps={view.journey} />}
 
     {view.status !== null
-      ? <StatusCard card={view.status} confirm={view.confirmStopped ?? null} rebuild={view.rebuild ?? null} retry={view.retry ?? null} failure={view.failure ?? null} csrf={csrf} />
+      ? <StatusCard view={view} card={view.status} csrf={csrf} />
       : <Html html={view.statusHtml} />}
 
     {/* The approval is its own section under the status, never a card inside it. */}

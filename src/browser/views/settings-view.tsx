@@ -1,7 +1,7 @@
 /** Settings, rebuilt with shadcn/ui. Every control posts to the same server
  * route as before (CSRF included); choices save the moment they change and
  * the server's confirmation arrives as a toast. */
-import { Bot, BookOpen, ChevronDown, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Plug, Send, Sparkles, Sun, Users, Workflow, Wrench } from "lucide-react";
+import { Bot, BookOpen, ChevronRight, Cpu, Hash, LineChart, MessageSquare, Monitor, Moon, Plug, Send, Sparkles, Sun, Users, Workflow, Wrench } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { BrowserSettingsView } from "../../browser-workspace.js";
@@ -176,7 +176,7 @@ function Email({ email, csrf }: { email: NonNullable<BrowserSettingsView["email"
     <Collapsible defaultOpen={!email.set && google === null}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <span className="inline-flex items-center gap-2 text-sm"><StatusDot tone={email.set || google !== null ? "ok" : "off"} />{status}</span>
-        <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="ml-auto group">{email.set || google !== null ? "Change" : "Set up"}<ChevronDown className="transition-transform group-data-[state=open]:rotate-180" /></Button></CollapsibleTrigger>
+        <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="ml-auto group">{email.set || google !== null ? "Change" : "Set up"}<ChevronRight className="transition-transform group-data-[state=open]:rotate-90" /></Button></CollapsibleTrigger>
       </div>
       <CollapsibleContent>
         {google !== null
@@ -241,7 +241,7 @@ function Providers({ providers, csrf }: { providers: NonNullable<BrowserSettings
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="font-semibold">{one.name}</span>
             <span className="inline-flex items-center gap-2 text-sm text-muted-foreground"><StatusDot tone={one.tone} />{one.words}</span>
-            <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="ml-auto group">Manage<ChevronDown className="transition-transform group-data-[state=open]:rotate-180" /></Button></CollapsibleTrigger>
+            <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="ml-auto group">Manage<ChevronRight className="transition-transform group-data-[state=open]:rotate-90" /></Button></CollapsibleTrigger>
           </div>
           <CollapsibleContent>
             <form method="post" action="/settings/provider-key" className="mt-3 grid gap-3 rounded-lg bg-muted p-4">
@@ -319,7 +319,7 @@ function Updates({ updates, csrf, firstResult }: { updates: NonNullable<BrowserS
     </div>}
     {newer && <Collapsible>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="group -ml-2.5" disabled={newer.notes === ""}>What's new in {newer.version}<ChevronDown className="transition-transform group-data-[state=open]:rotate-180" /></Button></CollapsibleTrigger>
+        <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="group -ml-2.5" disabled={newer.notes === ""}>What's new in {newer.version}<ChevronRight className="transition-transform group-data-[state=open]:rotate-90" /></Button></CollapsibleTrigger>
         <a className="text-[13px] underline underline-offset-4" href={newer.url} target="_blank" rel="noreferrer">Release page</a>
       </div>
       <CollapsibleContent>
@@ -425,7 +425,7 @@ function TelegramToken({ view, csrf }: { view: BrowserSettingsView; csrf: string
   return <Collapsible className="rounded-lg border border-border bg-card">
     <CollapsibleTrigger asChild><button className="group flex w-full items-center justify-between gap-3 px-5 py-4 text-left phone:px-4">
       <span className="font-semibold">Telegram bot token <span className="ml-2 text-sm font-normal text-muted-foreground">{view.telegram.state}</span></span>
-      <ChevronDown className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+      <ChevronRight className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
     </button></CollapsibleTrigger>
     <CollapsibleContent className="grid gap-3 border-t border-border px-5 py-4 phone:px-4">
       <p className="text-[13px] text-muted-foreground">Current: {view.telegram.current}</p>

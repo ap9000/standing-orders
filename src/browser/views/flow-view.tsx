@@ -10,6 +10,8 @@ import { NEEDS } from "../../needs-you.js";
 import { Background, BackgroundVariant, BaseEdge, Controls, EdgeLabelRenderer, Handle, MarkerType, NodeResizer, Position, ReactFlow, ReactFlowProvider, applyNodeChanges, getSmoothStepPath, useReactFlow, type Connection, type Edge, type EdgeProps, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Bell, BellOff, Bot, CalendarClock, Download, Ellipsis, Hourglass, LineChart, ListChecks, MessageSquareReply, Copy, Flag, GitPullRequest, Hammer, Inbox, Megaphone, MessageSquare, MousePointerClick, Pencil, PenLine, Plus, Search, Split, Globe, Mail, Wrench, SquareKanban, UserCheck, Webhook, Workflow, X, Zap } from "lucide-react";
+import { threadWhen } from "./task-view.js";
+import { deadlineWords, shortWhen, viewerZone } from "../../when-html.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BrowserFlowCard, BrowserFlowStage, BrowserFlowTrigger, BrowserFlowView } from "../../browser-workspace.js";
 import { Badge, Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Input, Label, Textarea, cn, toast } from "../components/ui/index.js";
@@ -297,14 +299,10 @@ function slug(title: string, taken: Set<string>): string {
   return id;
 }
 
-const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-/** A card's deadline in the viewer's own clock: "No reply by 4:30 PM" today, "No reply by Tue 4:30 PM" this week, "Moves on Oct 2" further out. */
-const deadlineWords = (deadline: { at: string; label: string }) => {
-  const then = new Date(deadline.at), now = new Date();
-  if (then.toDateString() === now.toDateString()) return `${deadline.label} ${then.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
-  if (then.getTime() - now.getTime() < 6 * 86_400_000) return `${deadline.label} ${then.toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}`;
-  return `${deadline.label.replace(/ at$/, "")} ${then.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
-};
+/** The one formatter (when-html.ts), in the viewer's zone. */
+const when = (at: string) => threadWhen(at);
+/** The same, keeping the time of day on a date further out ("Sep 28 16:39"): a deadline or history line needs its hour. */
+const whenAt = (at: string, now = new Date()) => Number.isNaN(new Date(at).getTime()) ? "" : shortWhen(at, now, viewerZone(), true);
 /** Minutes as people say them: "45 min", "4 h", "3 days". */
 const minutesWords = (minutes: number) => minutes % 1440 === 0 ? `${minutes / 1440} day${minutes === 1440 ? "" : "s"}` : minutes % 60 === 0 ? `${minutes / 60} h` : `${minutes} min`;
 
@@ -442,7 +440,7 @@ function CardPanel({ card, view, csrf, apply, onClose }: { card: BrowserFlowCard
     <Discussion card={card} view={view} csrf={csrf} apply={apply} />
     <div className="flex flex-col gap-1.5">
       <h3 className="text-[13px] font-semibold">History</h3>
-      <ol className="flex flex-col gap-1.5">{card.history.map((line, index) => <li key={index} className="text-[12px]"><span className="text-muted-foreground">{new Date(line.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span> · {line.text}</li>)}</ol>
+      <ol className="flex flex-col gap-1.5">{card.history.map((line, index) => <li key={index} className="text-[12px]"><span className="text-muted-foreground">{whenAt(line.at)}</span> · {line.text}</li>)}</ol>
     </div>
     {view.canEdit && card.state === "active" && <Button variant="ghost" size="sm" className="self-start text-destructive" disabled={busy} onClick={() => void act(`${base}/cancel`, {})}>Cancel card</Button>}
   </div>;
@@ -831,7 +829,7 @@ function NewCard({ view, csrf, apply, onClose }: { view: BrowserFlowView; csrf: 
 const ago = (at: string | null): string => {
   if (at === null) return "";
   const minutes = Math.round((Date.now() - Date.parse(at)) / 60_000);
-  return minutes < 1 ? "Just now" : minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.round(minutes / 60)} h ago` : new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return minutes < 1 ? "Just now" : minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.round(minutes / 60)} h ago` : threadWhen(at);
 };
 
 function CopyLine({ label, value }: { label: string; value: string }) {

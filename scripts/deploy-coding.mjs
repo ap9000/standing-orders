@@ -84,8 +84,10 @@ export function releaseStaleCodingDeployment(candidate, database, orders, stoppe
   if (!exists(`${database}.coding.sqlite`) || typeof candidate?.releaseStaleCodingOwner !== 'function') return null;
   const released = candidate.releaseStaleCodingOwner(orders, stoppedPids);
   if (released === null) return null;
+  // The release time is kept so a restored ledger dates it when it happened, not when it was restored.
   record.codingOwnerReleased = released;
-  ledgerStaleCodingRelease(orders, released);
+  record.codingOwnerReleasedAt = new Date().toISOString();
+  ledgerStaleCodingRelease(orders, released, record.codingOwnerReleasedAt);
   return released;
 }
 

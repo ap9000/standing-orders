@@ -113,7 +113,7 @@ describe("short human titles and plain chat words", () => {
 
   test("one finished task is one or two short sentences, outcome first; several are one line with the names", () => {
     const fact = (summary: string, headline = "Ready for review", checks: "passed" | "failed" | null = "passed") => ({ summary, headline, checks, report: false, completedBy: null });
-    expect(batchLine([fact("Search now ignores accents")])).toBe("Search now ignores accents is ready. Your tests passed. Mark it complete?");
+    expect(batchLine([fact("Search now ignores accents")])).toBe("Search now ignores accents is ready. Your tests passed. Accept and finish it?");
     expect(batchLine([{ ...fact("Search now ignores accents"), pullRequest: true }])).toBe("Search now ignores accents is ready. Your tests passed. Merge it?");
     // The lead says "I" for what it did.
     expect(batchLine([{ ...fact("Search now ignores accents"), lead: true, pullRequest: true }])).toBe("I finished search now ignores accents. Your tests passed. Merge it?");
@@ -291,7 +291,7 @@ describe("chat voice on Telegram", () => {
     expect(store.pingAllowed(fact, "bob")).toBe(true);
   });
 
-  test("a ready result offers its real next step and a look first: [Mark complete] or, with a pull request, [Merge]", async () => {
+  test("a ready result offers its real next step and a look first: [Accept and finish] or, with a pull request, [Merge]", async () => {
     const script = scriptedTelegram();
     await pass(script);
     script.reset();
@@ -299,9 +299,9 @@ describe("chat voice on Telegram", () => {
     await pass(script);
     const pings = script.pings(BOB_CHAT);
     expect(pings).toHaveLength(1);
-    expect(String(pings[0]!.params["text"])).toBe("Keep the guard readable is ready. Your tests passed. Mark it complete?");
+    expect(String(pings[0]!.params["text"])).toBe("Keep the guard readable is ready. Your tests passed. Accept and finish it?");
     expect(script.buttons(pings[0]!)).toEqual([
-      { text: "Mark complete", url: `${ORIGIN}/chat?task=guard-12&result=${run}` },
+      { text: "Accept and finish", url: `${ORIGIN}/chat?task=guard-12&result=${run}` },
       { text: "Look first", url: `${ORIGIN}/chat?task=guard-12&result=${run}&tab=changes` },
     ]);
     // An open pull request: the ask is "Merge it?", and [Merge] opens the task's merge control.

@@ -138,7 +138,7 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     const html = await (await fetch(url("/chat"), { headers: { cookie } })).text();
     expect(html).toContain("Chat isn’t available in demo mode");
     expect(html).toContain("Demo data never contacts an external model. Start Toolroll with a real project to use chat: <code>npx toolroll up</code> in your repository.");
-    expect(html).not.toContain("chat is off.");
+    expect(html).not.toContain("Chat is off.");
   });
 
   test("the saved chat catch-up identifies the unfinished prerequisite", async () => {
@@ -804,7 +804,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(thread).not.toContain('data-card-kind="fleet-overview"');
     expect(thread).toContain('aria-label="projects in this conversation"');
     expect(thread).toContain('name="message" value="Brief me on what needs my attention, what is building, and the highest-leverage next action across every project."');
-    expect(thread).toMatch(/<span class="name">all projects/);
+    expect(thread).toMatch(/<span class="name">All projects/);
     expect(thread).toContain('class="card composer"');
     expect(thread).not.toContain('name="token"');
     expect(thread).toContain("What do you want to get done?");
@@ -847,7 +847,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(card?.match(/<a /g)).toHaveLength(1);
     expect(card).not.toMatch(/pending|proposed by|Open control|<form/);
     const hold = /<article[^>]*data-card-kind="hold"[^>]*>([\s\S]*?)<\/article>/.exec(html)?.[1];
-    expect(hold).toContain("pending");
+    expect(hold).toContain("Pending");
     expect(hold).toContain("/confirm");
     expect(store.activeHold(store.refFor("built-in", "b").id, clockNow)).toBeNull();
   });
@@ -934,7 +934,9 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain("your next step");
     expect(html).not.toContain("approve to start");
     expect(html).not.toContain("These are the exact terms");
-    expect(html).toContain('<a class="approval-link" href="/t/a#scope">Edit plan</a><a class="approval-link" href="/chat">Not now</a>');
+    // Edit plan opens the task page's sheet with its fields ready to edit.
+    expect(html).toContain('<a class="approval-link" href="/t/a?edit=plan#plan-editor">Edit plan</a><a class="approval-link" href="/chat">Not now</a>');
+    expect(html).toContain("Your password signs this approval.");
     expect(html.match(/<button type="submit" data-primary-action>Approve & start<\/button>/g)).toHaveLength(1);
     expect(html).toContain('action="/t/a/approve"');
     expect(html).toContain('name="return" value="/chat?task=a"');
@@ -973,7 +975,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(focusedFresh).not.toContain("choose a useful starting point");
     expect(focusedFresh).not.toContain("Changes appear as cards for you to confirm.");
     expect(focusedFresh).toContain('<p class="meta composer-hint" id="chat-connection" role="status" aria-live="polite"></p>');
-    expect([...focusedFresh.matchAll(/class="quiet">([^<]+)<\/button><\/form>/g)].map(m => m[1]).filter(one => one !== "end the conversation and forget the thread")).toEqual(["what’s happening", "review results", "adjust the plan", "Enable updates"]);
+    expect([...focusedFresh.matchAll(/class="quiet">([^<]+)<\/button><\/form>/g)].map(m => m[1]).filter(one => one !== "End the conversation and forget the thread")).toEqual(["What’s happening", "Review results", "Adjust the plan", "Enable updates"]);
     expect(focusedFresh).toContain('action="/chat/mate/follow"');
     expect(focusedFresh).toContain('href="/chat?task=a" class="active" aria-current="page">Ask</a>');
 
@@ -1084,7 +1086,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     expect(html).not.toContain("Keep the work moving");
     expect(html).toContain('<details class="decision-context"><summary>Context</summary>');
     expect(html).toContain('The old structure is removed.');
-    expect(html).toContain('irreversible');
+    expect(html).toContain('Irreversible');
     expect(html).toContain(`action="/d/${decision}/answer"`);
     expect(html).toContain('name="return" value="/chat?task=a"');
     expect(html).toContain(`/d/${decision}?return=%2Fchat%3Ftask%3Da`);
@@ -1165,7 +1167,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
     expect(html).toContain("The lead uses your Codex sign-in.");
     expect(html).toContain("Codex membership (logged-in CLI)");
-    expect(html).toContain("no dollar maximum");
+    expect(html).toContain("No dollar maximum");
     expect(html).toContain("codex login");
     expect(html).not.toContain('name="weekly-usd"');
     expect(html).not.toContain('name="ceiling-usd"');
@@ -1295,7 +1297,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     await post(cookie, "/chat", { csrf, message: "tidy up" });
     await settle();
     let html = await page(cookie);
-    expect(html).toContain("cancelling is armed on the task itself");
+    expect(html).toContain("Cancelling is armed on the task itself");
     expect(html).not.toContain('action="/chat/proposal/1/confirm"');
     expect(html).toContain('action="/chat/proposal/2/confirm"');
     await post(cookie, "/chat/proposal/1/confirm", { csrf });
@@ -1513,7 +1515,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     const cookie = await login();
     let html = await page(cookie);
     const csrf = csrfFrom(html);
-    expect(html).toContain("proposed by coordinators");
+    expect(html).toContain("Proposed by coordinators");
     expect(html).toContain('action="/proposals/1/confirm"');
     expect(html).toContain('action="/proposals/2/confirm"');
     expect(html).toContain("it ships");
@@ -1551,7 +1553,7 @@ describe("the mate's thread (mate arc, slice 2): one ceremony, then a conversati
     await settle();
     let html = await page(cookie);
     expect(html).toContain("malformed");
-    expect(html).toContain("unknown spend blocks chat");
+    expect(html).toContain("Unknown spend blocks chat");
     html = await page(cookie);
     expect(html).not.toContain("malformed and was discarded");
     const bearer = await fetch(url("/chat/mate/mint"), { method: "POST", headers: { authorization: `Bearer ${approverToken}`, origin: base }, body: new URLSearchParams({ "ceiling-usd": "5", token: approverToken }), redirect: "manual" });
@@ -1904,7 +1906,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     const ref = store.refFor("built-in", taskId);
     expect(ref.deliverable).toBe("report");
     let page = await (await fetch(`${base}/t/${taskId}`, { headers: { cookie } })).text();
-    expect(page).toContain(">scout<");
+    expect(page).toContain(">Scout<");
     expect(page).toContain("delivers a report, never a branch");
     // Said INSIDE the ceremony: the yes buys a report, not a branch.
     expect(page).toContain("Read-only: it reports back and changes nothing in the repository.");
@@ -1923,7 +1925,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     page = await (await fetch(`${base}/t/${taskId}`, { headers: { cookie } })).text();
     expect(page).toContain("The cookie races the assertion");
     expect(page).toContain("Async cookie in src/session.ts.");
-    expect(page).toContain("file this follow-up");
+    expect(page).toContain("File this follow-up");
 
     // A tampered file never renders: the problem is named instead.
     writeS(join(evidenceRoot, String(run), "report.json"), content.toString("utf8").replace("Async", "Sync"));
@@ -1957,7 +1959,7 @@ describe("scout tasks and the digest card on the console (mate arc §10)", () =>
     const revision = /name="projectRevision" value="(\d+)"/.exec(form)?.[1] ?? "0";
     await fetch(`${base}/tasks/add`, { method: "POST", headers: { cookie, origin: base }, body: new URLSearchParams({ acceptance: "c1: ok | manual-review", csrf, projectRevision: revision, title: "scout me", goal: "find out", repo: "/repo/main", scout: "1" }), redirect: "manual" });
     const next = await (await fetch(`${base}/next`, { headers: { cookie } })).text();
-    expect(next).toContain("approve exactly this:");
+    expect(next).toContain("Approve exactly this:");
     expect(next).toContain("a read-only session investigates this goal and delivers a report");
   });
 

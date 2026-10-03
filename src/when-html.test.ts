@@ -1,5 +1,7 @@
-import { describe, expect, test } from "vitest";
-import { shortWhen, whenHtml, whenUtc } from "./when-html.js";
+import { describe, expect, test, vi } from "vitest";
+import { Window } from "happy-dom";
+import { deadlineWords, localizeTimes, shortWhen, whenHtml, whenUtc } from "./when-html.js";
+import { ledgerBody } from "./ledger-view.js";
 
 describe("times on a phone", () => {
   const now = new Date("2026-09-30T17:10:00Z");
@@ -15,8 +17,53 @@ describe("times on a phone", () => {
 
   test("the desk keeps the full stamp, and so does the title", () => {
     const html = whenUtc("2026-09-30T16:39:12.000Z", now);
-    expect(html).toBe('<time datetime="2026-09-30T16:39:12.000Z" title="2026-09-30 16:39 UTC"><span class="so-when-full">2026-09-30 16:39 UTC</span><span class="so-when-short">16:39</span></time>');
+    expect(html).toBe('<time data-when datetime="2026-09-30T16:39:12.000Z" title="2026-09-30 16:39 UTC"><span class="so-when-full">2026-09-30 16:39 UTC</span><span class="so-when-short">16:39</span></time>');
     expect(whenHtml(null, "never", now)).toBe("");
     expect(whenHtml("2026-09-30T16:39:00Z", '<b>"', now)).toContain('title="&lt;b&gt;&quot;"');
+  });
+});
+
+describe("the one formatter in the viewer's zone", () => {
+  const now = new Date("2026-10-02T19:00:00Z");
+  const zone = "America/Los_Angeles";
+
+  test("a deadline or history line further out keeps its time of day", () => {
+    expect(shortWhen("2026-09-28T23:59:00Z", now, "UTC", true)).toBe("Sep 28 23:59");
+    expect(shortWhen("2025-12-31T10:00:00Z", now, "UTC", true)).toBe("Dec 31 2025 10:00");
+    expect(shortWhen("2026-10-02T16:30:00Z", now, "UTC", true)).toBe("16:30");
+    expect(deadlineWords({ at: "2026-10-02T23:30:00Z", label: "No reply by" }, now, zone)).toBe("No reply by 16:30");
+    expect(deadlineWords({ at: "2026-10-03T23:30:00Z", label: "No reply by" }, now, zone)).toBe("No reply by Tomorrow 16:30");
+    expect(deadlineWords({ at: "2026-10-09T23:30:00Z", label: "Moves on at" }, now, zone)).toBe("Moves on Oct 9 16:30");
+  });
+
+  test("only the server's stamps are reworded: React's times, relative ages and the ledger's exact seconds keep theirs", async () => {
+    const window = new Window();
+    try {
+      const ledger = ledgerBody([{ id: 7, at: "2026-10-01T21:16:42.123Z", actor: "sam", repo: null, taskId: null, runId: null, action: "Approved", outcome: "ok", source: "work", detail: null }], [], new URLSearchParams());
+      window.document.body.innerHTML =
+        `<div data-workspace-native>${whenUtc("2026-10-01T21:16:00.000Z", now)}${ledger}</div>` +
+        // The home lead's age and a thread time, as React writes them.
+        `<p id="lead"><time datetime="2026-10-02T18:57:00.000Z">3 min ago</time></p><p id="thread"><time datetime="2026-10-02T16:39:00.000Z" title="2026-10-02 09:39">09:39</time></p>` +
+        `<p id="chat"><time datetime="2026-10-02T18:57:00.000Z">3m ago</time></p>`;
+      localizeTimes(window.document as unknown as ParentNode, now, zone);
+      const server = window.document.querySelector("time[data-when]")!;
+      expect(server.textContent).toBe("Yesterday 14:16");
+      expect(server.getAttribute("title")).toBe("2026-10-01 14:16");
+      const exact = window.document.querySelector(".ledger-time time")!;
+      expect(exact.textContent).toBe("2026-10-01 21:16:42");
+      expect(exact.getAttribute("title")).toBe("2026-10-01T21:16:42.123Z");
+      expect(window.document.querySelector("#lead time")!.textContent).toBe("3 min ago");
+      expect(window.document.querySelector("#thread time")!.textContent).toBe("09:39");
+      expect(window.document.querySelector("#thread time")!.getAttribute("title")).toBe("2026-10-02 09:39");
+      expect(window.document.querySelector("#chat time")!.textContent).toBe("3m ago");
+    } finally { await window.happyDOM.close(); }
+  });
+
+  test("one Intl.DateTimeFormat per zone, however many times a page shows", () => {
+    const made = vi.spyOn(Intl, "DateTimeFormat");
+    try {
+      for (let i = 0; i < 50; i++) shortWhen(`2026-09-${String(1 + (i % 28)).padStart(2, "0")}T10:00:00Z`, now, "Asia/Kathmandu");
+      expect(made.mock.calls.filter(call => (call[1] as Intl.DateTimeFormatOptions | undefined)?.timeZone === "Asia/Kathmandu")).toHaveLength(1);
+    } finally { made.mockRestore(); }
   });
 });

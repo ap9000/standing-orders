@@ -9,11 +9,11 @@ import type { Store } from './store.js';
 import type { WorkSummaryAccess } from './work-summary.js';
 import { workIndexPage, type WorkIndexItem, type WorkIndexPage } from './work-index.js';
 import type { StatusTone } from './workspace-ui.js';
-import type { Ask } from './needs-you.js';
+import type { Ask, AskChip } from './needs-you.js';
 import type { WorkIndexGroup } from './work-index.js';
 import type { AssignmentCard } from './assignment-ui.js';
 import type { TaskStatus } from './task-status.js';
-import type { ResultActs } from './result-acts.js';
+import type { AcceptLabel, ResultActFacts, ResultActs } from './result-acts.js';
 import type { FirstRunStep, FirstTaskSuggestion, JourneyStep } from './first-run.js';
 
 export type BrowserProject = { name: string; path: string; href: string; knowledgeHref: string };
@@ -63,8 +63,10 @@ export type BrowserTasksView = {
   rows: {
     id: string; title: string; href: string; project: string | null; age: string;
     status: { label: string; tone: StatusTone; token: string };
-    /** What a Needs you row asks (its chip); null for every other row. */
+    /** What a Needs you row asks: its group. */
     ask: Ask | null;
+    /** The row's chip under its group: the specific ask (Plan, Result, Mismatch, Plan changed, Failed, Builder offline), or none. */
+    chip: AskChip | null;
     group: BrowserTaskGroup;
     action: BrowserLink | null; detail: string | null; problem: string | null; notes: string[];
   }[];
@@ -158,10 +160,21 @@ export type BrowserTaskView = {
   confirmStopped?: { action: string; run: number; checked?: boolean } | null;
   /** Build again, in place, when the status asks for it (a result built to an earlier plan). */
   rebuild?: { action: string } | null;
-  /** A failed task's recorded reason in one line (the run's reason, the failing check's last error line, or that none was
-   * recorded) and where its log lines are; and Retry itself, with an optional note. */
-  failure?: { line: string; link: { label: string; href: string } | null } | null;
-  retry?: { action: string } | null;
+  /** What a failed task missed, in one line (the requirement it missed, the failing check's error line, or the stop
+   * reason), the evidence line behind it, one suggestion of what to change, and where to see it (its build's result
+   * page, or that exact check-log line); and Retry itself, its note starting with the suggestion. */
+  failure?: BrowserFailure | null;
+  retry?: { action: string; note?: string } | null;
+  /** Run checks in place, on a status row that offers it: posts and comes back to this page. */
+  runChecks?: BrowserRunChecks | null;
+  /** A live build: the step it is on (or stuck on, with the act that helps), and the earlier attempts that stopped
+   * before it, folded into one quiet line. */
+  progress?: { line: string; stuck: { step: number; why: string | null; line: string; action: BrowserLink | null } | null } | null;
+  /** Stop, on the Building card: the exact live build's stop form (posts its run id). */
+  stop?: { action: string; run: number } | null;
+  /** The Building card's link to the live build's own record ("Build #N record", /r/<id>). */
+  record?: BrowserLink | null;
+  earlier?: { summary: string; attempts: { label: string; href: string; text: string | null }[] } | null;
   /** Server cards that may need a person now (stop/resume, scope prompt, plan, live attempt). */
   lead: { key: string; html: string }[];
   questions: string;
@@ -219,6 +232,8 @@ export type BrowserResultPanel = {
   /** Requirements only a person can confirm, in plain words, and the one
    * Accept that records the decision (null when it is not offered here). */
   youCheck: { lines: string[]; items: BrowserCheckItem[]; accept: { action: string; run: number; returnTo: string } | null } | null;
+  /** The Requirements row's counts, so it updates as the person answers their checks (null when it doesn't count them). */
+  requirements?: { met: number; total: number; yours: number } | null;
   /** Storage limits on saved output (shortened logs or diffs): shown on request. */
   limits: string[];
   tabs: { key: BrowserResultTab; label: string; count: string; href: string; active: boolean }[];
@@ -242,8 +257,10 @@ export type BrowserCheckItem = {
   shots: { src: string; href: string; caption: string }[];
 };
 /** The result's one decision: what Accept is called, why it isn't plain
- * Accept, and what pressing it does. */
-export type BrowserResultDecision = { label: "Accept" | "Accept without checks"; ready: boolean; why: string | null; effect: string; sentence: string };
+ * Accept and finish, and what pressing it does. `base`: the same words before
+ * the person's own checks, which the page adds as they answer them. */
+export type BrowserResultDecision = { label: AcceptLabel; ready: boolean; why: string | null; effect: string; sentence: string;
+  base?: { label: AcceptLabel; ready: boolean; why: string | null } };
 /** A Needs you action: a link, (Confirm it stopped) a form behind the password, (Build again) one
  * button, or (on the result itself) Accept, which records the person's acceptance; `note` asks why
  * when the evidence disagrees. */
@@ -265,8 +282,10 @@ export type BrowserResultView = {
     status: { label: string; tone: StatusTone; token: string };
     problem: string | null;
     next: { kind: string; title: string; detail: string; control: string } | null;
-    complete: { action: string; receipt: string; run: number } | null;
-    /** Words for the result's Accept: Mark complete when offered, else the Needs you acceptance. */
+    /** Accept and finish: the exact receipt read; `accept` when the one request also records the person's acceptance
+     * (`note`: the words over the reason field it asks for, or null for none). */
+    complete: { action: string; receipt: string; run: number; accept?: { note: string | null } | null } | null;
+    /** Words for the result's Accept: Accept and finish when offered, else the Needs you acceptance. */
     decision: BrowserResultDecision | null;
     checks: { detail: string; problem: boolean; logHref: string | null } | null;
     /** A refuted result's recorded disagreements: the headline when the report doesn't match the changes (null when a
@@ -276,18 +295,27 @@ export type BrowserResultView = {
     mismatch: { headline: string | null; rows: { text: string; path: string | null; lines: string | null; href: string | null; absent: boolean; noteLabel: string | null }[]; said: string[] } | null;
     /** The one ink act that resolves the result, the one outline act beside it, and why it can't be accepted yet (result-acts.ts). */
     acts: ResultActs;
+    /** The facts the acts were chosen from, so the page chooses again as the person answers their checks. */
+    actFacts?: ResultActFacts;
     /** Run checks on this result's commit: the project's check, when it didn't run. */
-    runChecks: { action: string; level: "quick" | "full"; returnTo: string } | null;
+    runChecks: BrowserRunChecks | null;
+    /** A failed build's result: what it missed and the suggestion Retry's note starts with; Retry itself when the task
+     * can be retried from here. Null for every other result. */
+    failure?: (BrowserFailure & { retry: { action: string; note: string } | null;
+      /** A failed task's delivered result, accepted only in outline with a reason (the task's accept-proof). */
+      acceptAnyway?: { action: string; run: number; returnTo: string } | null }) | null;
     /** The raw run record, under Details: its facts and the full record. */
     record: { build: number; href: string; facts: { label: string; value: string }[] } | null;
     /** The signed scope; null when none was filed. */
-    intent: { approval: string; html: string } | null;
+    intent: { approval: string; approvedAt: string | null; html: string } | null;
     noRun: string | null;
     panel: BrowserResultPanel | null;
     contest: string;
     notes: { author: string; at: string; note: string }[];
   } | null;
 };
+export type BrowserFailure = { line: string; evidence: string | null; suggestion: string; link: { label: string; href: string } | null };
+export type BrowserRunChecks = { action: string; level: "quick" | "full"; returnTo: string };
 /** One zone on a flow's canvas: its step, where it leads, and where it sits. */
 export type BrowserFlowStage = {
   id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "pull-request" | "update" | "notify" | "sort" | "draft" | "request" | "email" | "tool" | "wait" | "teammate" | "done";

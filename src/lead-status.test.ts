@@ -68,7 +68,7 @@ describe("lead status commands", () => {
 
     expect(code).toBe(0);
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toBe(`Ready | run #${runId} | checks passed (exit 0) | next: Review result`);
+    expect(lines[0]).toBe(`Ready | run #${runId} | checks passed (exit 0) | next: Open result`);
   });
 
   test("task wait follows a retry that lands between polls and reports the retry's own outcome", async () => {
@@ -102,7 +102,7 @@ describe("lead status commands", () => {
     try {
       const snapshot = taskWaitSnapshot(reader, "retried-while-waiting", LATER, firstRun);
       expect(snapshot).not.toBeNull();
-      expect(renderTaskWait(snapshot!)).toBe(`Ready | run #${retryRun}, a retry that replaced run #${firstRun} | checks passed (exit 0) | next: Review result`);
+      expect(renderTaskWait(snapshot!)).toBe(`Ready | run #${retryRun}, a retry that replaced run #${firstRun} | checks passed (exit 0) | next: Open result`);
     } finally {
       reader.close();
     }
@@ -157,7 +157,7 @@ describe("lead status commands", () => {
 
     const lines: string[] = [];
     expect(await runOperate("task", ["wait", "ready-with-failed-check"], line => lines.push(line), { databaseFile: db, now: NOW })).toBe(0);
-    expect(lines).toEqual([`Ready | run #${runId} | checks failed (exit 1) | next: Review result`]);
+    expect(lines).toEqual([`Ready | run #${runId} | checks failed (exit 1) | next: Open result`]);
   });
 
   test("task wait returns 2 with one status line on timeout", async () => {

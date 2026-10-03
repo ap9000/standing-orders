@@ -352,7 +352,10 @@ test('a deploy over a runtime killed before its close releases the stale owner o
     // Not a process this deploy stopped: never released.
     expect(() => releaseStaleCodingDeployment(candidate, f.database, orders, [999995], f.record)).toThrow('not one this update stopped');
     expect(releaseStaleCodingDeployment(candidate, f.database, orders, [999992, 999993], f.record)).toEqual({ pid: 999993, nativePid: 999994 });
-    expect(f.record).toMatchObject({ codingOwnerReleased: { pid: 999993, nativePid: 999994 } });
+    expect(f.record).toMatchObject({ codingOwnerReleased: { pid: 999993, nativePid: 999994 }, codingOwnerReleasedAt: expect.any(String) });
+    // The release time is kept so a restored ledger can date it the same.
+    const releasedAt = (f.record as { codingOwnerReleasedAt?: string }).codingOwnerReleasedAt;
+    expect(orders.prepare("SELECT at FROM action_ledger WHERE action='coding owner released'").get()).toEqual({ at: releasedAt });
     assertCodingDeploymentStopped(candidate, f.database, orders, f.record);
     expect(orders.prepare("SELECT actor,action,outcome FROM action_ledger WHERE action='coding owner released'").all()).toEqual([{ actor: 'deploy', action: 'coding owner released', outcome: 'released' }]);
     // Already released by an ordinary stop: nothing to do, nothing ledgered twice.

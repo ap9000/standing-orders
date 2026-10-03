@@ -5,10 +5,9 @@
  * step is one quiet button. Filtering and paging stay server-side (real
  * URLs), so Back and bookmarks work. Usage folds to one line on a desk and
  * sits below the list on a phone, so the first task is near the top. */
-import { ArrowRight, ChevronDown, Ellipsis, Inbox, LayoutGrid, ListTodo, Plus, Repeat, Sparkles, Code2, ListOrdered, Briefcase } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronRight, Ellipsis, Inbox, LayoutGrid, ListTodo, Plus, Repeat, Sparkles, Code2, ListOrdered, Briefcase } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { BrowserLimits, BrowserLimitTile, BrowserTasksView } from "../../browser-workspace.js";
-import { ASK_LABEL } from "../../needs-you.js";
 import { Button, Card, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, cn } from "../components/ui/index.js";
 import { HeadlineBadge } from "./status-summary.js";
 
@@ -65,17 +64,23 @@ export function usageSummary(limits: BrowserLimits): { key: string; text: string
   });
 }
 
-/** A waiting row's chip is ink (the primary fill, which an accent preset never recolours), naming the ask. */
-function TaskChip({ row }: { row: BrowserTasksView["rows"][number] }) {
+/** A row's chip. A waiting row sits under its group heading (Decide, Review, Unblock), so its chip names the
+ * specific ask in ink (Plan, Result, Mismatch, Failed, Builder offline), never the heading again; with no
+ * specific ask it wears none, and its state stays one tap away in the row's own words. Outside a group (an
+ * ungrouped list, or a row no heading covers) such a row wears its headline, so every row shows a state word.
+ * Every other row wears its headline, the same words as the task page, the result and Crew. */
+function TaskChip({ row, grouped }: { row: BrowserTasksView["rows"][number]; grouped: boolean }) {
   const place = "text-[12px] desk:col-start-1 desk:row-start-1 desk:justify-self-start phone:col-start-1 phone:row-start-2 phone:self-center";
   if (row.ask === null) return <HeadlineBadge label={row.status.label} tone={row.status.tone === "attention" ? "neutral" : row.status.tone} className={place} />;
-  return <span data-ask={row.ask} title={row.status.label}
+  if (row.chip === null && !grouped) return <HeadlineBadge data-ask={row.ask} label={row.status.label} tone={row.status.tone} className={place} />;
+  if (row.chip === null) return <span className={cn("sr-only", place)} data-headline={row.status.label}>{row.status.label}</span>;
+  return <span data-ask={row.ask} data-chip={row.chip} data-headline={row.status.label} title={row.status.label}
     className={cn("inline-flex w-fit shrink-0 items-center whitespace-nowrap rounded-[5px] bg-primary px-1.5 py-px font-semibold leading-[18px] text-primary-foreground", place)}>
-    {ASK_LABEL[row.ask]}
+    <span className="sr-only">{row.status.label}: </span>{row.chip}
   </span>;
 }
 
-function TaskRow({ row }: { row: BrowserTasksView["rows"][number] }) {
+function TaskRow({ row, grouped = false }: { row: BrowserTasksView["rows"][number]; grouped?: boolean }) {
   // On a phone the row is a small grid: the title with its action on the right, then the chip beside the
   // project and age, then any detail. The title block and the chip cluster dissolve into it (contents).
   const waiting = row.ask !== null;
@@ -96,7 +101,7 @@ function TaskRow({ row }: { row: BrowserTasksView["rows"][number] }) {
       {row.notes.map(note => <p key={note} className="mt-1 text-[12.5px] text-muted-foreground phone:col-span-full phone:leading-[1.35]">{note}</p>)}
     </div>
     <div className="flex items-center gap-3 phone:contents desk:contents">
-      <TaskChip row={row} />
+      <TaskChip row={row} grouped={grouped} />
       {row.action && <Button asChild variant="outline" size="sm" className="desk:col-start-3 desk:row-start-1 desk:justify-self-end phone:col-start-3 phone:row-start-1 phone:self-start">
         <a href={row.action.href} data-primary-action>{row.action.label}<ArrowRight /></a>
       </Button>}
@@ -117,7 +122,7 @@ function TaskList({ view }: { view: BrowserTasksView }) {
       <h2 id={`task-group-${section.key}`} className={cn("flex items-baseline gap-2 border-b border-border px-2 pb-1.5 text-[13px] font-semibold leading-5 desk:col-span-3", index > 0 && "desk:mt-6")}>
         {section.label}<span className="font-mono text-[12px] font-medium tabular-nums text-muted-foreground">{section.count}</span>
       </h2>
-      <ul className="desk:contents">{section.rows.map(row => <TaskRow key={row.id} row={row} />)}</ul>
+      <ul className="desk:contents">{section.rows.map(row => <TaskRow key={row.id} row={row} grouped />)}</ul>
     </section>)}
     {loose.length > 0 && <ul className="desk:contents">{loose.map(row => <TaskRow key={row.id} row={row} />)}</ul>}
   </div>;
@@ -130,7 +135,7 @@ function UsageToggle({ limits, open, onToggle, controls }: { limits: BrowserLimi
     className="ml-auto inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-[var(--so-raised)] hover:text-foreground phone:hidden">
     <span className="sr-only">Usage: </span>
     <span className="truncate tabular-nums">{parts.map((part, index) => <span key={part.key}>{index > 0 && <span aria-hidden="true"> · </span>}<span className={LIMIT_TEXT[part.tone]}>{part.text}</span></span>)}</span>
-    <ChevronDown aria-hidden="true" className={cn("size-3.5 shrink-0 motion-safe:transition-transform", open && "rotate-180")} />
+    <ChevronRight aria-hidden="true" className={cn("size-3.5 shrink-0 motion-safe:transition-transform", open && "rotate-90")} />
   </button>;
 }
 

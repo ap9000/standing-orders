@@ -18,12 +18,12 @@
  */
 
 import type { DispatchAction, DispatchDiagnosis } from "./dispatch.js";
-import { ACCEPT_NEEDS_REASON } from "./result-acts.js";
+import { ACCEPT_NEEDS_REASON, type AcceptLabel } from "./result-acts.js";
 export { ACCEPT_NEEDS_REASON };
 import { GOAL_ASSESSMENT_PENDING, manualReviewOnly, plainReasonWords, type ProofVerdict } from "./proof.js";
 import type { ReviewRetryState, TaskState } from "./store.js";
 import type { TaskControlView } from "./task-control.js";
-import { plainReasonOf, stageOfCode, taskStatusOf, workToneOf } from "./task-status.js";
+import { OPEN_RESULT, plainReasonOf, stageOfCode, taskStatusOf, workToneOf } from "./task-status.js";
 
 /** The Work destination's views — shortcuts over the same rows, never a
  * persisted state. All is the default. */
@@ -122,7 +122,7 @@ export function reviewStatusOf(review: ReviewFacts | null): DisplayStatus | null
   // is queued or running. A failed review never blocks: the result reads as
   // it would unreviewed, marked "not reviewed" by the result itself.
   if (review === null || review.automaticPending !== true || (review.state !== "queued" && review.state !== "running")) return null;
-  return { token: "reviewing", label: "Reviewing", detail: "An automatic review is reading this result before it reaches you.", tone: "live", action: { label: "Open the result", kind: "open-result" } };
+  return { token: "reviewing", label: "Reviewing", detail: "An automatic review is reading this result before it reaches you.", tone: "live", action: { label: OPEN_RESULT, kind: "open-result" } };
 }
 
 export type PublicationFacts = {
@@ -285,11 +285,11 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       // weighed, so it says nothing about whether that check passed.
       detail: withPublication("What the agent reported doesn't match the changes it saved."),
       tone: "problem",
-      action: { label: "Open the result", kind: "open-review" },
+      action: { label: OPEN_RESULT, kind: "open-review" },
     };
   }
   if (result.verdict === "short" && humanReview) {
-    return { token: "verification-needed", label: "Ready to inspect", detail: withPublication("The remaining requirements need a person's inspection."), tone: "attention", action: { label: "Inspect the result", kind: "open-review" } };
+    return { token: "verification-needed", label: "Ready to inspect", detail: withPublication("The remaining requirements need a person's inspection."), tone: "attention", action: { label: OPEN_RESULT, kind: "open-review" } };
   }
   if (result.verdict === "short") {
     return {
@@ -306,7 +306,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
     // presence facts here.
     return result.recordComplete === false && result.verdict === null
       ? { token: "record-incomplete", label: "No-change result, record incomplete", detail: "The build concluded nothing needed to change, but its handoff or sealed diff is missing.", tone: "problem", action: { label: "Open the record", kind: "open-run" } }
-      : { token: "no-change", label: "No changes were needed", detail: withPublication("The build concluded nothing needed to change; its handoff and sealed diff are on record."), tone: "done", action: { label: "Open the result", kind: "open-result" } };
+      : { token: "no-change", label: "No changes were needed", detail: withPublication("The build concluded nothing needed to change; its handoff and sealed diff are on record."), tone: "done", action: { label: OPEN_RESULT, kind: "open-result" } };
   }
   if (result.verdict === null) {
     return {
@@ -323,7 +323,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       label: "Result saved — checks reported by the agent",
       detail: withPublication("No independent project check ran; the checks listed are the agent's own report."),
       tone: "neutral",
-      action: { label: "Open the result", kind: "open-result" },
+      action: { label: OPEN_RESULT, kind: "open-result" },
     };
   }
   if (published !== null && (published.token === "merge-observed" || published.token === "pr-opened" || published.token === "pr-closed")) {
@@ -332,7 +332,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
       label: published.label,
       detail: `The approved check passed against this result. ${published.detail}`,
       tone: published.token === "pr-closed" ? "muted" : "done",
-      action: published.token === "merge-observed" ? { label: "Open the result", kind: "open-result" } : { label: "Open the pull request", kind: "open-pr" },
+      action: published.token === "merge-observed" ? { label: OPEN_RESULT, kind: "open-result" } : { label: "Open the pull request", kind: "open-pr" },
     };
   }
   return {
@@ -340,7 +340,7 @@ function storedResultStatusOf(result: ResultFacts | null, publication: Publicati
     label: "Ready",
     detail: withPublication("The approved check passed against this result."),
     tone: "ready",
-    action: { label: "Open the result", kind: "open-result" },
+    action: { label: OPEN_RESULT, kind: "open-result" },
   };
 }
 
@@ -411,7 +411,7 @@ export function needsPerson(dispatch: DispatchDiagnosis | null): boolean {
 /** Navigation labels describe the available help, not a mutation: opening
  * a hold or pause must never promise that the task has already resumed. */
 const DISPATCH_ACTION_LABELS: Record<DispatchAction, string> = {
-  "open-result": "Open the result",
+  "open-result": OPEN_RESULT,
   "retry-task": "Review and retry",
   "place-task": "Choose a project",
   "write-scope": "Define the task",
@@ -541,22 +541,22 @@ export function lastErrorLineOf(log: string): { line: number; text: string } | n
 export const RESULT_DECISION_SENTENCE = "Review the change, then accept it or ask for changes.";
 
 /** What the result page's Accept says, from facts it already shows: the
- * recorded checks, the requirements not met, the ones a person still checks,
- * whether the saved proof reads, and what the button posts. "Accept" only when everything is met and the
- * checks passed; otherwise "Accept without checks" and one line naming what.
+ * recorded checks, the requirements not met, whether the saved proof reads,
+ * and what the button posts. "Accept and finish" only when everything is met
+ * and the checks passed; otherwise "Accept without checks" and one line naming
+ * what. The person's own checks are the page's to add (acceptWithChecksOf).
  * `effect` says what pressing it does, in the action's own terms. */
 export type AcceptFacts = {
   checks: "passed" | "failed" | "not-run" | "off" | "running" | "unavailable" | null;
   unmet: number;
-  yours: number;
-  /** `complete`: marks the exact result complete; `accept`: records a person's acceptance only. */
+  /** `complete`: accepts and finishes the exact result in one request; `accept`: records a person's acceptance only (nothing here can finish it). */
   action: "complete" | "accept";
   /** `pull-request`: one can be opened from the task after; `off`: publishing isn't set up; `other`: neither is said. Accept itself never publishes. */
   publishing: "pull-request" | "off" | "other";
   /** False when the saved proof is missing or can't be read: nothing on record says what was met. */
   proof: boolean;
 };
-export type AcceptWords = { label: "Accept" | "Accept without checks"; ready: boolean; why: string | null; effect: string };
+export type AcceptWords = { label: AcceptLabel; ready: boolean; why: string | null; effect: string };
 
 export function acceptWordsOf(facts: AcceptFacts): AcceptWords {
   const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
@@ -565,15 +565,14 @@ export function acceptWordsOf(facts: AcceptFacts): AcceptWords {
     ...(facts.checks === "passed" ? [] : [facts.checks === "failed" ? "checks failed" : facts.checks === "off" ? "checks are off for this project"
       : facts.checks === "running" ? "checks are still running" : facts.checks === "unavailable" ? "saved checks can't be read" : "checks didn't run"]),
     ...(facts.unmet > 0 ? [`${plural(facts.unmet, "requirement isn't", "requirements aren't")} met`] : []),
-    ...(facts.yours > 0 ? [`${plural(facts.yours, "item still needs", "items still need")} your check`] : []),
   ];
   const ready = parts.length === 0;
   const joined = parts.length <= 1 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
-  const effect = facts.action === "accept" ? "Records that you accept it. You mark it complete next."
-    : facts.publishing === "pull-request" ? "Marks it complete. No pull request opens; you can open one from the task after."
-    : facts.publishing === "off" ? "Marks it complete. The branch stays; publishing isn't set up."
-    : "Marks it complete. Nothing is published.";
-  return { label: ready ? "Accept" : "Accept without checks", ready, why: ready ? null : `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`, effect };
+  const effect = facts.action === "accept" ? "Records that you accept it. The task stays open."
+    : facts.publishing === "pull-request" ? "Finishes the task. No pull request opens; you can open one from the task after."
+    : facts.publishing === "off" ? "Finishes the task. The branch stays; publishing isn't set up."
+    : "Finishes the task. Nothing is published.";
+  return { label: ready ? "Accept and finish" : "Accept without checks", ready, why: ready ? null : `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`, effect };
 }
 
 export function resultHeadlineOf<T extends DisplayStatus>(status: T): T {
@@ -707,4 +706,58 @@ export function learningHtml(view: import('./project-learning.js').LearningView,
   if (source !== undefined) return lessons.length ? `<details class="learning result-learning"><summary>Learned from this task</summary>${cards}<a href="/settings/learning?repo=${encodeURIComponent(view.repo)}">Learning settings</a></details>` : '';
   const history = view.events.map(ev => `<article class="card" data-learning-event="${e(ev.action)}"><p><strong>${e(({ assessment: ({ propose: 'Learning suggested', none: 'No lesson needed', unassessed: 'Learning not assessed', invalid: 'Learning assessment invalid' } as Record<string,string>)[ev.after] ?? 'Learning not assessed', proposal: 'Suggestion recorded', adopt: 'Lesson adopted', disable: 'Lesson disabled', reset: 'Learning reset', enable: 'Reuse enabled', pause: 'Reuse paused', reuse: 'Run context saved', failure: 'Learning issue', capture: 'Capture finished' } as Record<string,string>)[ev.action] ?? ev.action)}</strong>${ev.action === "reuse" ? ` · ${e(ev.after)}` : ""}</p><p class="meta"><time datetime="${e(ev.at)}">${e(ev.at.replace("T", " ").replace(/\.\d+Z$/, " UTC"))}</time> · ${e(ev.actor)}${ev.run === null ? '' : ` · <a href="/r/${ev.run}">Run #${ev.run}</a>${ev.outcome === null ? "" : ` · ${e(ev.outcome)}`}`}</p><details><summary>Details</summary><p>${e(ev.before)} → ${e(ev.after)}</p><p>${e(ev.reason)}</p>${ev.lesson === null ? '' : `<p>Lesson #${ev.lesson}</p>`}<ul>${evidence(ev.evidence, ev.run)}</ul>${ev.snapshot === null ? "" : `<details><summary>Exact context</summary><pre>${e(ev.snapshot)}</pre></details>`}</details></article>`).join('');
   return `<section class="learning">${view.damaged ? '<p class="problem" role="alert">Some lessons no longer verify and are excluded from reuse.</p>' : ''}<p>${view.enabled ? 'Use adopted lessons: on' : 'Use adopted lessons: off'}</p>${act(view.enabled ? 'pause' : 'enable', view.enabled ? 'Pause reuse' : 'Enable reuse')}${cards || '<p>No lessons yet. Reviews may suggest useful advice here.</p>'}<details><summary>Reset learning</summary><p>Disable all adopted lessons and future reuse. Keep history, code, approvals and active run snapshots.</p>${act('reset', 'Reset learning')}</details><h2>Changes</h2>${history || '<p>No learning changes yet.</p>'}${view.next === null ? '' : `<a class="button-link" href="/settings/learning?repo=${encodeURIComponent(view.repo)}&before=${view.next}">Older changes</a>`}</section>`;
+}
+
+/** The first signed requirement a finished attempt missed (failed or unanswered; a person's own check is not a miss),
+ * with the evidence line behind it in plain words. Null when every requirement held. */
+export function missedRequirementOf(matrix: readonly { id: string; statement: string; state: string; detail: readonly string[] }[]):
+  { id: string; statement: string; evidence: string | null } | null {
+  const missed = matrix.find(row => row.state === "failed") ?? matrix.find(row => row.state === "missing") ?? null;
+  if (missed === null) return null;
+  const detail = missed.detail.find(one => !/is waiting for the final check/.test(one)) ?? missed.detail[0] ?? null;
+  return { id: missed.id, statement: missed.statement, evidence: detail === null ? (missed.state === "missing" ? "The agent's report doesn't answer it." : null) : requirementEvidenceWords(missed.id, detail) };
+}
+
+/** A matrix row's recorded detail as a sentence a person reads: the agent's own note when one admits the miss. */
+function requirementEvidenceWords(id: string, detail: string): string {
+  const caveat = CONTRADICTED_BY_CAVEAT.exec(detail);
+  // The note often names its requirement first ("c1: …"); the line already says which requirement it is.
+  if (caveat !== null && caveat[1] === id) return sentenceOf(`The agent's own note says: ${caveat[2]!.trim().replace(new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[:—-]\\s*`), "")}`);
+  const lead = [`criterion "${id}"'s `, `criterion "${id}" `].find(prefix => detail.startsWith(prefix));
+  return sentenceOf(plainReasonWords(lead === undefined ? detail : detail.slice(lead.length)));
+}
+
+/** One milestone of a live build's plan, as the agent last reported it; its words are null where only the recorded
+ * progress was read (a list row reads no plan file). */
+export type BuildStep = { description: string | null; state: "pending" | "current" | "completed" | "blocked"; note: string | null };
+/** Where a live build is, in one line: "Step 3 of 6: …", or, when a step is blocked, "Stuck on step 4 of 6: <why>" in
+ * its place. `stuck` says which step and why; null while nothing is blocked. */
+export type BuildProgress = { step: number; total: number; line: string; stuck: { step: number; why: string | null; line: string } | null };
+
+const stepWords = (text: string | null): string | null => {
+  const plain = text?.trim().replace(/\s+/g, " ").replace(/[.\s]+$/, "") ?? "";
+  return plain === "" ? null : plain;
+};
+
+/** A live build's progress: the step in progress (else the first one not done) as "Step N of M: <step>"; a blocked
+ * step replaces it as "Stuck on step N of M: <why>" (its note, else the step itself). Null with no plan steps. */
+export function buildProgressOf(steps: readonly BuildStep[] | null | undefined): BuildProgress | null {
+  if (steps == null || steps.length === 0) return null;
+  const total = steps.length;
+  const blocked = steps.findIndex(one => one.state === "blocked");
+  if (blocked >= 0) {
+    const why = stepWords(steps[blocked]!.note) ?? stepWords(steps[blocked]!.description);
+    const line = `Stuck on step ${blocked + 1} of ${total}${why === null ? "" : `: ${why}`}.`;
+    return { step: blocked + 1, total, line, stuck: { step: blocked + 1, why, line } };
+  }
+  const current = steps.findIndex(one => one.state === "current");
+  const at = current >= 0 ? current : steps.findIndex(one => one.state !== "completed");
+  if (at < 0) return { step: total, total, line: `All ${total} steps done. Finishing up.`, stuck: null };
+  const words = stepWords(steps[at]!.description);
+  return { step: at + 1, total, line: `Step ${at + 1} of ${total}${words === null ? "" : `: ${words}`}.`, stuck: null };
+}
+
+/** Earlier attempts that stopped before the one now running, in one quiet line. */
+export function earlierAttemptsWords(count: number): string {
+  return `${count} earlier attempt${count === 1 ? "" : "s"} stopped`;
 }

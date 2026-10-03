@@ -14,10 +14,11 @@ import { verificationEvidence } from "./verification-evidence.js";
 import { reproveApprover, type VerifiedApprover } from "./principal.js";
 import { noteAssignmentStatus } from "./assignment-status.js";
 import { historicalAssessmentReason } from "./assignment-presentation.js";
+import { manualReviewOnly } from "./proof.js";
 import { runCheckLevel, type CheckLevel } from "./check-levels.js";
 import { followUpChecksOf, withFollowUps } from "./result-follow-ups.js";
 import { buildReviewOf, findingWords, type BuildReviewView } from "./review-switch.js";
-import { NEEDS, WAITS, processNeedOf, type NeedKey, type WaitKey } from "./needs-you.js";
+import { NEEDS, WAITS, processNeedOf, resultHoldUpSentence, type NeedKey, type WaitKey } from "./needs-you.js";
 import { assignmentStageOf } from "./task-status.js";
 import { leadClaimOf, type LeadClaim } from "./lead-voice.js";
 
@@ -64,6 +65,10 @@ export type AssignmentSnapshot = {
   need?: { key: NeedKey; build: number | null } | { wait: WaitKey; build: number | null } | null;
   /** The person's lead took it on (lead-voice.ts): "Your lead is on it" until done, handed on, or two quiet hours. */
   lead?: LeadClaim | null;
+  /** How many earlier versions of this task are still queued or running; absent when none. */
+  earlierActive?: number;
+  /** Of those, how many are running rather than only queued; present with earlierActive. */
+  earlierRunning?: number;
 };
 
 /** Status-first handoff for routine reads. Fetch get_assignment only when
@@ -167,9 +172,11 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     return decision === null ? [] : [{ taskId: version.id, decision }];
   });
   // A finished task label cannot hide a lease or an unfinished process record.
-  const earlierActive = family.versions.filter(version => version.id !== current.id &&
-    (version.state === "queued" || version.state === "running" || store.currentLiveLease(version.refId, now) !== null ||
-      store.runsFor(version.refId).some(run => run.outcome === null || store.stopQuiescenceProblem(run.id) !== null)));
+  const busy = (version: typeof current): boolean => version.state === "running" || store.currentLiveLease(version.refId, now) !== null ||
+    store.runsFor(version.refId).some(run => run.outcome === null || store.stopQuiescenceProblem(run.id) !== null);
+  const earlierActive = family.versions.filter(version => version.id !== current.id && (version.state === "queued" || busy(version)));
+  // Of those, how many have work under way (the rest only wait in the queue).
+  const earlierRunning = earlierActive.filter(busy).length;
   const unfinished = store.runsFor(current.refId).find(run => run.outcome === null) ?? null;
   const attempts = family.versions.map(version => {
     const summary = version.id === current.id ? work : taskWorkSummaryOf(store, version.id, now, access);
@@ -272,7 +279,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     detail = completionKind === "research-report" ? "The research report is ready for the lead to read."
       : completionKind === "accepted-exception" ? "An operator accepted this result with its recorded limitations. The lead can inspect that decision; the recorded checks are unchanged."
       : receipt.checks.detail;
-    primaryAction = { code: "open-result", label: completionKind === "research-report" ? "Read report" : receipt.checks.status === "failed" ? "Inspect failed check" : completionKind === "accepted-exception" ? "Review acceptance" : "Open result", target: { taskId: current.id, runId: result!.id, decisionId: null }, access: "read", retry: "read-again" };
+    primaryAction = { code: "open-result", label: completionKind === "research-report" ? "Read report" : "Open result", target: { taskId: current.id, runId: result!.id, decisionId: null }, access: "read", retry: "read-again" };
     const checked = store.handle.prepare("SELECT actor,at FROM action_ledger WHERE task_id = ? AND run_id = ? AND action = ? AND outcome = ? AND source = 'work' ORDER BY id DESC")
       .all(family.root.id, result!.id, CHECK_ACTION, receipt.digest).find(row => /^(operator|coordinator|lead):.+/.test(String(row["actor"])));
     // This ledger fact was authorized when written. Credential rotation,
@@ -293,7 +300,11 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
     if (current.state === "done" && work.status.tone !== "attention" && work.status.tone !== "problem") detail = result?.role === "scout"
       ? completionKind === null ? "The research report is missing or incomplete. Inspect the saved report before checking this handoff."
         : "The saved report is awaiting resolution of its current scope or hold."
-      : "Inspect the saved result and resolve its remaining execution or scope issue.";
+      : resultHoldUpSentence({ hold: store.activeHolds(current.refId, now)[0]?.reason ?? null,
+          planChanged: result !== null && scope !== null && !!result.scopeDigest && scope.digest !== result.scopeDigest,
+          unapproved: scope === null || scope.termsProblem != null || !approvalOf(scope).approved, question: questions.length > 0,
+          running: store.currentLiveLease(current.refId, now) !== null, unfinished: unfinished !== null,
+          noCommit: result === null || completionKind === null });
     // Built to an earlier plan: the result page can't resolve it (accepting would leave it stuck), building again can.
     if (current.state === "done" && result !== null && scope !== null && scope.termsProblem == null && approvalOf(scope).approved && !!result.scopeDigest && scope.digest !== result.scopeDigest &&
       store.activeHolds(current.refId, now).length === 0 && unfinished === null && store.currentLiveLease(current.refId, now) === null && store.finalResultReason(result.id) === null) {
@@ -358,7 +369,7 @@ export function assignmentOf(store: Store, taskId: string, now: Date, access: As
   return { version: 1, rootId: family.root.id, activeTaskId: current.id, repo: current.repo, title: family.root.title,
     state, detail, primaryAction, attention: [...new Set(attention)], attempts, owner, receipt, savedContext, completion, handoff,
     publication: publication === null ? null : { state: publication.state, prUrl: publication.prUrl, remoteState: publication.remoteState },
-    review, deployment: { status: "not-recorded" }, ...(need === null ? {} : { need }), ...(lead === null ? {} : { lead }) };
+    review, deployment: { status: "not-recorded" }, ...(need === null ? {} : { need }), ...(lead === null ? {} : { lead }), ...(earlierActive.length === 0 ? {} : { earlierActive: earlierActive.length, earlierRunning }) };
 }
 
 type MutationResult = { ok: true; assignment: AssignmentSnapshot } | { ok: false; reason: string; message: string };
@@ -446,6 +457,67 @@ export function checkAssignmentAsOperator(store: Store, taskId: string, receiptD
     if (current === null || !store.accountCanAccess(who.name, current.repo)) return { ok: false, reason: "not-found", message: "No assignment is available in your projects." };
     return acknowledgeCurrent(store, current, receiptDigest, `operator:${who.name}`, now, root, access);
   }));
+}
+
+/** The acceptance's own ledger act, as a separate Accept request records it. */
+export const ACCEPT_ACTION = "task accept-proof";
+
+/** Only a person's check stands between this result and done: its proof is short for that alone, and nobody accepted it. */
+export function personCheckPending(receipt: AssignmentReceipt | null): boolean {
+  return receipt !== null && receipt.proofAcceptance === null && manualReviewOnly(receipt.proof === null ? null : { verdict: receipt.proof.verdict, reasons: receipt.proof.reasons, matrix: receipt.proof.matrix });
+}
+
+type Finished = { ok: true } | { ok: false; reason: string; message: string };
+class Undone extends Error { constructor(readonly result: { ok: false; reason: string; message: string }) { super(result.message); } }
+
+/** An acceptance this receipt owes before it finishes: the person's own check (no reason needed), or an
+ * exception the proof needs and the person gave a reason for. Null when Accept and finish is a plain
+ * completion: nothing is owed, it was already accepted, or an exception came without its reason. */
+export function owedAcceptance(receipt: AssignmentReceipt | null, note: string | null): "person-check" | "exception" | null {
+  if (receipt === null || receipt.proofAcceptance !== null) return null;
+  if (personCheckPending(receipt)) return "person-check";
+  return note !== null && receipt.proof?.verdict !== "verified" && receipt.proof?.verdict !== "attested" ? "exception" : null;
+}
+
+/** Accept and finish: the person's acceptance of the exact result they read and its completion, in one
+ * transaction. Whether an acceptance is owed is decided here, against the receipt as it stands: only a
+ * person's own check or a reasoned exception records one (with its ledger act); anything else is the plain
+ * completion Mark complete always was. The completion names the receipt the acceptance produced, under the
+ * same digest a separate Accept then Mark complete leave. `receiptDigest` is the receipt as read, before
+ * accepting (`runId`, when named, must be its run); any other change refuses both, and a refused completion
+ * keeps no acceptance. `finish` completes the receipt (Mark complete by default; Complete and open a pull
+ * request passes its own). */
+export function acceptAndCompleteAsOperator(store: Store, taskId: string, input: { runId: number | null; receiptDigest: string; note: string | null },
+  who: VerifiedApprover, now: Date, root = evidenceRoot(homedir()),
+  finish: (digest: string) => Finished = digest => checkAssignmentAsOperator(store, taskId, digest, who, now, root)): Finished {
+  try {
+    return withActor(currentActor() ?? { account: who.name, lead: false }, () => store.transact((): Finished => {
+      if (!reproveApprover(store, who).ok) return { ok: false, reason: "unauthenticated", message: "Sign in again before accepting this result." };
+      const access: AssignmentAccess = { principal: "operator", repos: who.repos };
+      const before = assignmentOf(store, taskId, now, access, root);
+      if (before === null || !store.accountCanAccess(who.name, before.repo)) return { ok: false, reason: "not-found", message: "No assignment is available in your projects." };
+      const receipt = before.receipt;
+      if (receipt === null || (input.runId !== null && receipt.runId !== input.runId) || !/^[a-f0-9]{64}$/.test(input.receiptDigest) || receipt.digest !== input.receiptDigest) {
+        return { ok: false, reason: "stale", message: "This result changed. Open the current result before accepting it." };
+      }
+      // Already complete, or nothing owed: the plain completion of the receipt as read.
+      const owed = before.state === "ready-to-check" ? owedAcceptance(receipt, input.note) : null;
+      let digest = receipt.digest;
+      if (owed !== null) {
+        store.acceptProof(receipt.runId, who.name, input.note, now);
+        store.recordAction({ at: now.toISOString(), actor: who.name, repo: before.repo, taskId, runId: null, action: ACCEPT_ACTION, outcome: "accepted", source: "request" });
+        const accepted = assignmentOf(store, taskId, now, access, root)?.receipt ?? null;
+        if (accepted === null || accepted.runId !== receipt.runId) throw new Undone({ ok: false, reason: "stale", message: "This result changed. Open the current result before accepting it." });
+        digest = accepted.digest;
+      }
+      const done = finish(digest);
+      if (!done.ok) throw new Undone(done);
+      return done;
+    }));
+  } catch (error) {
+    if (error instanceof Undone) return error.result;
+    throw error;
+  }
 }
 
 function noteAssignmentHandoff(store: Store, assignment: AssignmentSnapshot, now: Date): void {

@@ -529,7 +529,7 @@ describe("shared chat action lifecycle", () => {
     expect(confirm(action)).toMatchObject({ ok: false, reason: "needs-confirm" });
     expect(assignment(id)?.state).toBe("ready-to-check");
     const before = store.proofVerdictFor(run);
-    expect(confirmMateProposal(store, who, action, now, { via: "telegram", evidenceRoot: root, confirm: true })).toMatchObject({ ok: true, said: "Marked complete. The recorded checks are unchanged." });
+    expect(confirmMateProposal(store, who, action, now, { via: "telegram", evidenceRoot: root, confirm: true })).toMatchObject({ ok: true, said: "Accepted and finished. The recorded checks are unchanged." });
     expect(assignment(id)).toMatchObject({ state: "complete", completion: { actor: "operator:operator" } });
     expect(store.proofVerdictFor(run)).toEqual(before);
     expect(store.proofAcceptance(run)).toBeNull();

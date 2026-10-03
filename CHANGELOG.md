@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.15 — 2026-10-02
+
+- **Accept finishes the task.** One step, Accept and finish, after the
+  evidence. Your own checks come first, and the count updates as you answer.
+- **Failures say what failed.** A failed task names the requirement or check
+  it missed and suggests what to change, prefilled in Retry. Failed builds get
+  a real result page. Builds show "Step 2 of 6" and say when they're stuck.
+- **One set of words.** The same state names in the list, task page, result
+  page and Crew. Project checks and PR CI are labelled apart, and every time
+  shows in your own time zone.
+- **Approving says what you allow.** A plain "You're allowing" line sits above
+  Approve, your password says what it signs, and Edit plan edits in place.
+- **Safer deploys.** An interrupted deploy puts the old service and its coding
+  store back.
+
 ## 0.9.14 — 2026-10-02
 
 - **Results and failures say what went wrong.** A result whose report doesn't

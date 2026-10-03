@@ -21,7 +21,7 @@ export const WORKSPACE_MOTION_CSS = String.raw`
 .t-acc[data-open="false"] > .t-acc-panel { grid-template-rows: 0fr; }
 .t-acc[data-open="false"] > .t-acc-panel > .t-acc-panel-inner { opacity: 0; }
 .t-acc > summary { cursor: pointer; }
-.t-acc > summary .t-acc-chevron { width: 14px; height: 14px; margin-left: .4rem; }
+.t-acc > summary .t-acc-chevron { width: 14px; height: 14px; margin-right: .375rem; flex: none; }
 .t-acc > summary .t-acc-chevron svg { width: 100%; height: 100%; }
 .t-acc > summary::before, .t-acc > summary::after { content: none !important; }
 .t-acc > summary::-webkit-details-marker { display: none; }
@@ -61,9 +61,9 @@ export const WORKSPACE_MOTION_SCRIPT = String.raw`
       Array.from(details.childNodes).forEach(function(node){if(node!==head)inner.appendChild(node);});
       panel.appendChild(inner);details.appendChild(panel);details.classList.add('t-acc');
       var chevron=document.createElement('span');chevron.className='t-acc-chevron';chevron.setAttribute('aria-hidden','true');
-      chevron.innerHTML='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6.5L8 10.5L12 6.5"/></svg>';
+      chevron.innerHTML='<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 4L10 8L6 12"/></svg>';
       // Use the existing icon when present, rather than rendering two.
-      var old=head.querySelector(':scope > svg');if(old)old.remove();head.appendChild(chevron);
+      var old=head.querySelector(':scope > svg');if(old)old.remove();head.prepend(chevron);
     }
     details.dataset.motionReady='true';
     var timer=null,closing=false;
