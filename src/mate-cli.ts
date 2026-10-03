@@ -264,7 +264,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
       const outcome: MateTurnOutcome = { ok: false, refused: "session-ended", message: "this mate session has ended — run chat again to mint one" };
       return outcome;
     }
-    return runMateTurn({ store, who, session: live, thread, config, key, message, ...(seams.fetcher === undefined ? {} : { fetcher: seams.fetcher }), ...(seams.subscriptionRunner === undefined ? {} : { subscriptionRunner: seams.subscriptionRunner }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), clock });
+    return runMateTurn({ store, who, session: live, thread, config, key, message, channel: "terminal", ...(seams.fetcher === undefined ? {} : { fetcher: seams.fetcher }), ...(seams.subscriptionRunner === undefined ? {} : { subscriptionRunner: seams.subscriptionRunner }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), clock });
   };
   const report = (outcome: MateTurnOutcome): void => {
     if (outcome.ok && outcome.replayed) {

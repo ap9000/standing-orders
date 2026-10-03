@@ -388,6 +388,7 @@ export async function processChatEvent(
         clock: () => nowOf(options),
         evidenceRoot: options.evidenceRoot,
         mediaDelivery: "documents",
+        channel: options.label === "Slack" ? "slack" : options.label === "Discord" ? "discord" : "teams",
         revalidate: async () => {
           try {
             await channelAccess(options, binding, resolved.who.ceilingDigest);

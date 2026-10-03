@@ -10,6 +10,7 @@ import { phoneText, projectLabel, type PhoneTaskLink } from "./telegram-status.j
 import type { Run, Store } from "./store.js";
 import { assignmentStatusFacts, headlineEmoji, pullRequestFactOf, requirementsOf, statusDetailLines, unverifiedWhenRefuted, taskStatusOf, type ChecksFact, type TaskStatus, type TaskStatusFacts } from "./task-status.js";
 import { leadClaimOf } from "./lead-voice.js";
+import { leadNameOf } from "./lead-identity.js";
 import { chatTitle } from "./chat-voice.js";
 import { manualReviewOnly } from "./proof.js";
 import { failedCheckExit } from "./workspace-ui.js";
@@ -76,10 +77,10 @@ export function telegramProgressCard(store: Store, run: Run, taskId: string, pro
   // "Marked complete by <you>" (or by your lead, which signs in as you) is never told back to you.
   const completer = assignment?.completion?.actor.replace(/^(?:operator|coordinator|lead):/, "") ?? null;
   if (viewer !== undefined && facts.completedBy != null && (completer === viewer || facts.completedBy === viewer)) facts = { ...facts, completedBy: null };
-  // The person's lead took it on: "Your lead is on it" rather than waiting for them (lead-voice.ts).
+  // The person's lead took it on: "<name> is on it" rather than waiting for them (lead-voice.ts).
   if (facts.lead === undefined) {
     const lead = leadClaimOf(store, taskId, now, viewer);
-    if (lead !== null) facts = { ...facts, lead: lead.state };
+    if (lead !== null) facts = { ...facts, lead: lead.state, leadName: leadNameOf(store, lead.owner) };
   }
   const status = taskStatusOf(facts);
   const checkProgress = store.checkProgress(run.id);

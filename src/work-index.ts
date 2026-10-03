@@ -1,6 +1,7 @@
 /** Paginated, permission-bound summaries of saved task facts. These reads do
  * not verify artifacts or authorize task operations; a build Toolroll can't
  * yet confirm stopped is read through the store's own read-only probe. */
+import { leadNameOf } from './lead-identity.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -429,7 +430,9 @@ export function workIndexPage(store: Store, now: Date, access: WorkSummaryAccess
     const ref = store.lookupRef(taskId);
     return ref === null ? null : custody.readings.get(ref.id) ?? null;
   };
-  return { items: page.map(row => itemOf(row, access.principal, probe)), projects, totals: rows[0] === undefined ? { ...EMPTY } : counts(rows[0]),
+  // A claimed row says the viewer's own name for their lead.
+  const leadName = page.some(row => n(row, 'lead_claim') !== 0) && access.principal === 'operator' && access.viewer != null ? leadNameOf(store, access.viewer) : undefined;
+  return { items: page.map(row => itemOf(row, access.principal, probe, leadName)), projects, totals: rows[0] === undefined ? { ...EMPTY } : counts(rows[0]),
     groups: rows[0] === undefined ? { ...NO_GROUPS } : groupCounts(rows[0]), nextCursor, limit, view };
 }
 
@@ -474,13 +477,13 @@ function listChecksOf(own: 'passed' | 'failed' | null, level: string | null, fol
   return { status: read.status, exitCode: null, head: null, level: read.level, running: read.running };
 }
 
-function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (taskId: string) => StopFact | null): WorkIndexItem {
+function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (taskId: string) => StopFact | null, leadName?: string): WorkIndexItem {
   const code = String(row['code']), id = String(row['id']);
   const custody = code === 'process-needs-attention' || (code === 'result-needs-attention' && n(row, 'custody_unresolved') === 1);
   const process = custody && probe !== undefined ? processNeedOf(probe(id)) : null;
   const waiting = process !== null && 'wait' in process;
   const need = n(row, 'needs') === 1 && !waiting, running = n(row, 'family_running') === 1;
-  // The lead's claim (lead-voice.ts): the row still reads its own stage, worded "Your lead is on it".
+  // The lead's claim (lead-voice.ts): the row still reads its own stage, worded "<name> is on it".
   const lead = n(row, 'lead_claim') === 1 ? 'on-it' as const : n(row, 'lead_claim') === 2 ? 'lapsed' as const : null;
   const personNeed = (n(row, 'person_need') === 1 || need) && !waiting;
   const assignmentState: AssignmentSnapshot['state'] = code === 'complete' ? 'complete' : code === 'ready-to-check' ? 'ready-to-check'
@@ -569,7 +572,7 @@ function itemOf(row: Row, principal: WorkSummaryAccess['principal'], probe?: (ta
     reason: finished ? null : plainReasonOf(reading.stage, code, detail || null), report: s(row, 'result_role') === 'scout',
     checks: !finished ? null : listChecksOf(own, s(row, 'check_level'), row['check_follows']),
     completedBy: code !== 'complete' ? null : n(row, 'completed_by_lead') === 1 ? 'the lead' : String(row['checked_actor']).replace(/^(?:operator|coordinator|lead):/, ''),
-    ...(lead === null ? {} : { lead }) });
+    ...(lead === null ? {} : { lead, ...(leadName === undefined ? {} : { leadName }) }) });
   label = shared.headline;
   detail = shared.sentence;
   // Every Needs you action wears its need's own words.

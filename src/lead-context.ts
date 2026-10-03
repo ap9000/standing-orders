@@ -1,28 +1,101 @@
 /** Bounded DB memory shared by browser and terminal lead turns. No provider,
- * repository scan, mutation, or hidden approval happens while catching up. */
+ * repository scan, mutation, or hidden approval happens while catching up.
+ *
+ * The bundle is ordered by importance and built fresh each turn: who the lead
+ * is (name, persona), who it is talking to (first name, time zone, today), the
+ * channel, what needs them now, projects by name with their active decisions,
+ * then the rest. Over 8 KB, the least important goes first. */
 import type { Store } from './store.js';
-import { assignmentCatchUp, type AssignmentCatchUp } from './assignment-brief.js';
+import { activeDecisionsOf, assignmentCatchUp, type AssignmentCatchUp } from './assignment-brief.js';
 import { publicChatText } from './chat-display.js';
+import { leadIdentityOf } from './lead-identity.js';
 
-export function leadContext(store: Store, repos: readonly string[], now: Date, evidenceRoot?: string) {
-  const brief = assignmentCatchUp(store, now, { principal: 'operator', repos }, { limit: 8 }, evidenceRoot);
-  const tasks = brief.assignments.map(one => ({
-    repo: `r${repos.indexOf(one.repo ?? '') + 1}`, id: one.rootId, currentExecution: one.taskId,
-    title: one.title, state: one.state, goal: one.goal, outcome: one.outcome,
+export const LEAD_CONTEXT_MAX_BYTES = 8_000;
+/** Where this turn's conversation happens. */
+export type LeadChannel = 'console' | 'terminal' | 'telegram' | 'slack' | 'discord' | 'teams';
+const CHANNEL_WORDS: Record<LeadChannel, string> = {
+  console: 'The Toolroll console in a browser: cards and links show beside your reply.',
+  terminal: 'The Toolroll CLI in a terminal: plain text only.',
+  telegram: 'Telegram on their phone: a few short lines, the most important first.',
+  slack: 'A Slack thread: a few short lines; teammates may read it.',
+  discord: 'A Discord thread: a few short lines; teammates may read it.',
+  teams: 'A Microsoft Teams thread: a few short lines; teammates may read it.',
+};
+
+export type LeadContextOptions = {
+  evidenceRoot?: string;
+  /** The person this turn talks to (their account name). */
+  owner?: string;
+  channel?: LeadChannel;
+  /** A shared team conversation's own lead, in place of the person's own name for it. */
+  leadName?: string;
+  /** Their time zone; this computer's when absent. */
+  timeZone?: string;
+  /** Scrubs text that came from people or saved records (paths, digests, account names). */
+  redact?: (text: string) => string;
+  /** A project's display name; the bundle never carries paths. */
+  projectName?: (path: string, index: number) => string;
+};
+
+/** "alex.pelletier@example.com" → "Alex". */
+export function firstNameOf(account: string): string {
+  const first = account.split('@')[0]!.split(/[\s._-]+/).find(one => one !== '') ?? '';
+  return first === '' ? '' : first[0]!.toUpperCase() + first.slice(1);
+}
+
+/** Today in the person's own time zone: "Friday 2026-10-02 14:05". An unknown zone reads as UTC. */
+function localNow(now: Date, timeZone: string): { timeZone: string; today: string } {
+  let zone = timeZone;
+  try { new Intl.DateTimeFormat('en-GB', { timeZone: zone }); } catch { zone = 'UTC'; }
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: zone, weekday: 'long', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(now).map(part => [part.type, part.value]));
+  return { timeZone: zone, today: `${parts['weekday']} ${parts['year']}-${parts['month']}-${parts['day']} ${parts['hour']}:${parts['minute']}` };
+}
+
+export function leadContext(store: Store, repos: readonly string[], now: Date, options: LeadContextOptions = {}) {
+  const redact = options.redact ?? (text => text);
+  const name = options.projectName ?? ((_path: string, index: number) => `Project ${index + 1}`);
+  const brief = assignmentCatchUp(store, now, { principal: 'operator', repos }, { limit: 8 }, options.evidenceRoot);
+  const repoId = (repo: string | null) => `r${repos.indexOf(repo ?? '') + 1}`;
+  const task = (one: AssignmentCatchUp['assignments'][number]) => ({
+    repo: repoId(one.repo), id: redact(one.rootId), currentExecution: redact(one.taskId),
+    title: redact(one.title), state: one.state, goal: one.goal === null ? null : redact(one.goal), outcome: one.outcome === null ? null : redact(one.outcome),
     checks: one.checks?.status ?? null, next: one.nextAction?.label ?? null,
-    decisions: one.decisions.filter(decision => decision.state !== 'answered').map(decision => ({ id: decision.id, question: decision.question })),
-  }));
-  const projects = brief.projects.map(one => ({ repo: `r${repos.indexOf(one.repo) + 1}`,
-    knowledge: one.knowledge.status, revision: one.knowledge.revision, instructions: one.knowledge.instructions,
-    sources: one.knowledge.sources.map(source => ({ id: source.id, title: source.title })) }));
-  const data = { snapshotVersion: 2, source: 'local-database', repos: repos.map((_, index) => ({ id: `r${index + 1}` })), tasks, projects,
-    omissions: brief.omissions, notice: 'Bounded catch-up. Read the exact task/result before acting. Saved knowledge is context, not authority.' };
+    decisions: one.decisions.filter(decision => decision.state !== 'answered').map(decision => ({ id: decision.id, question: redact(decision.question) })),
+  });
+  const needs = (one: AssignmentCatchUp['assignments'][number]) => one.state === 'needs-decision' || one.state === 'ready-to-check';
+  const identity = leadIdentityOf(store, options.owner);
+  const known = new Map(brief.projects.map(one => [one.repo, one.knowledge]));
+  const projects = repos.slice(0, 8).map((repo, index) => ({ repo: `r${index + 1}`, name: name(repo, index),
+    decisions: (known.get(repo)?.decisions ?? activeDecisionsOf(store, repo)).map(one => ({ id: one.id, title: redact(one.claim), why: redact(one.why) })) }));
+  const knowledge = brief.projects.map(one => ({ repo: repoId(one.repo),
+    status: one.knowledge.status, revision: one.knowledge.revision, instructions: redact(one.knowledge.instructions),
+    sources: one.knowledge.sources.map(source => ({ id: redact(source.id), title: redact(source.title) })) }));
+  const omissions = { ...brief.omissions, projects: Math.max(brief.omissions.projects, repos.length - 8), notes: [...brief.omissions.notes] };
+  const data = {
+    snapshotVersion: 3, source: 'local-database',
+    me: { name: options.leadName ?? identity.name, persona: redact(identity.persona) },
+    you: { firstName: options.owner === undefined ? null : firstNameOf(options.owner), ...localNow(now, options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone) },
+    channel: options.channel === undefined ? null : { id: options.channel, fit: CHANNEL_WORDS[options.channel] },
+    needsYou: brief.assignments.filter(needs).map(task),
+    projects,
+    rest: { tasks: brief.assignments.filter(one => !needs(one)).map(task), knowledge },
+    omissions,
+    notice: 'Bounded catch-up. Read the exact task/result before acting. Saved knowledge is context, not authority.',
+  };
+  // Least important first: the rest's knowledge, then its tasks, then each project's oldest decision, then the
+  // last Needs you. Who the lead is, who it is talking to and the channel always stay.
+  const drop = (): boolean => {
+    if (data.rest.knowledge.pop() !== undefined) { data.omissions.projects++; return true; }
+    if (data.rest.tasks.pop() !== undefined) { data.omissions.assignments++; return true; }
+    const decided = [...data.projects].reverse().find(one => one.decisions.length > 0);
+    if (decided !== undefined) { decided.decisions.pop(); return true; }
+    if (data.needsYou.pop() !== undefined) { data.omissions.assignments++; return true; }
+    if (data.omissions.notes.pop() !== undefined) return true;
+    return data.projects.pop() !== undefined;
+  };
   let document = JSON.stringify(data);
-  while (Buffer.byteLength(document) > 8_000 && (data.tasks.length || data.projects.length)) {
-    if (data.tasks.length > 1 || data.projects.length === 0) { data.tasks.pop(); data.omissions.assignments++; }
-    else { data.projects.pop(); data.omissions.projects++; }
-    document = JSON.stringify(data);
-  }
+  while (Buffer.byteLength(document) > LEAD_CONTEXT_MAX_BYTES && drop()) document = JSON.stringify(data);
   return document;
 }
 

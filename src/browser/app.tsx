@@ -423,13 +423,13 @@ function useLiveReply(chat: BrowserWorkspace["conversation"], watching: boolean,
 }
 
 /** What the lead is doing, then the words as they are written. */
-function LiveReplyBubble({ live }: { live: LiveReply | null }) {
+function LiveReplyBubble({ live, leadName }: { live: LiveReply | null; leadName: string }) {
   const steps = live?.steps ?? [];
   const tools = steps.flatMap(step => step.tools).filter((tool, index, all) => index === 0 || all[index - 1] !== tool);
   const text = [...steps].reverse().find(step => step.text.trim() !== "")?.text ?? "";
   const writing = steps.length > 0 && steps.at(-1)!.text.trim() !== "";
   return <Message from="assistant" className="so-live-reply" data-live-reply>
-    <div className="so-message-label">Lead</div>
+    <div className="so-message-label">{leadName}</div>
     <MessageContent>
       {tools.length > 0 && <ul className="so-live-steps" aria-label="What the lead is doing">
         {tools.map((tool, index) => <li key={index} data-done={writing || index < tools.length - 1 ? "true" : "false"}>{tool}</li>)}
@@ -476,14 +476,14 @@ function LeadChat({ controller, docked = null }: { controller: ReturnType<typeof
             {/* v99: or a working setup in one click — a teammate and the flow it works. */}
             <nav className="so-kit-links" aria-label="Starter kits" data-kit-links><span>Or start from a kit:</span>{KIT_LINKS.map(([id, label]) => <a key={id} className="so-suggestion" href={`/kits/${id}`}>{label}</a>)}</nav></>)}
       <div id="chat-thread" data-chat-region="thread">{chat.messages.map(message => <Message from={message.role === "operator" ? "user" : "assistant"} key={message.id} data-message-id={message.id}>
-        <div className="so-message-label">{message.role === "operator" ? "You" : "Lead"}</div>
+        <div className="so-message-label">{message.role === "operator" ? "You" : workspace.leadName ?? "Lead"}</div>
         <MessageContent><GuardedHtml html={message.html} />{message.activity && <Disclosure summary="Activity"><p className="so-activity-copy">{message.activity}</p></Disclosure>}
           {message.cards !== undefined && message.cards.length > 0
             ? <ActionCards cards={message.cards} csrf={workspace.csrf} onChanged={() => { void controller.check(); }} />
             : message.cardsHtml && <GuardedHtml html={message.cardsHtml} className="so-message-cards" />}
         </MessageContent>
       </Message>)}</div>
-      {(busy || live !== null) && <LiveReplyBubble live={live} />}
+      {(busy || live !== null) && <LiveReplyBubble live={live} leadName={workspace.leadName ?? "Lead"} />}
     </ConversationContent><ConversationScrollButton /></Conversation>
     <div className="so-composer-area">
       {!dock && workspace.phone && <PhoneCard phone={workspace.phone} csrf={workspace.csrf} />}
@@ -548,10 +548,10 @@ function useTaskThreadChat(controller: ReturnType<typeof useWorkspace>): ThreadC
   return {
     entries: chat.messages.map(message => ({ key: `message-${message.id}`, at: message.createdAt, node:
       <li key={`message-${message.id}`} data-message-id={message.id} data-thread-kind="message" className="so-thread-entry relative flex gap-3">
-        <span aria-hidden="true" className="relative z-[1] flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-card text-[10.5px] font-semibold text-muted-foreground">{message.role === "operator" ? "Y" : "L"}</span>
+        <span aria-hidden="true" className="relative z-[1] flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-card text-[10.5px] font-semibold text-muted-foreground">{message.role === "operator" ? "Y" : (workspace.leadName ?? "Lead").slice(0, 1).toUpperCase()}</span>
         <div className="min-w-0 flex-1 pb-5 phone:pb-4">
           <p className="flex min-h-6 flex-wrap items-baseline gap-x-2 text-[13px] leading-6">
-            <span className="font-medium">{message.role === "operator" ? "You" : "Lead"}</span>
+            <span className="font-medium">{message.role === "operator" ? "You" : workspace.leadName ?? "Lead"}</span>
             <time dateTime={message.createdAt} className="ml-auto text-xs tabular-nums text-muted-foreground">{threadWhen(message.createdAt)}</time>
           </p>
           <MessageContent className={message.role === "operator" ? "so-thread-mine" : "so-thread-theirs"}><GuardedHtml html={message.html} />
@@ -563,7 +563,7 @@ function useTaskThreadChat(controller: ReturnType<typeof useWorkspace>): ThreadC
         </div>
       </li> })),
     footer: <div className="so-task-composer flex flex-col gap-2">
-      {(busy || live !== null) && <LiveReplyBubble live={live} />}
+      {(busy || live !== null) && <LiveReplyBubble live={live} leadName={workspace.leadName ?? "Lead"} />}
       {delivery && <div className="so-connection" role={stale ? "alert" : "status"}><span>{delivery}</span>
         {stale ? <ViewButton variant="outline" size="sm" onClick={controller.reconnect}>Reconnect</ViewButton> : !sending && !offline && <ViewButton variant="ghost" size="sm" onClick={() => { void controller.check(); }}>Check again</ViewButton>}
       </div>}
@@ -665,7 +665,7 @@ export function WorkspaceApp({ initial }: { initial: BrowserWorkspace }) {
     <div className={`so-main-column${isChat ? " so-main-column--chat" : ""}`}>
       <header className="so-workspace-header"><PhoneNavigation workspace={workspace} />{pageOnly
         ? <p className="so-header-title">{section}</p>
-        : <h1>{isChat ? "Lead" : section}</h1>}
+        : <h1>{isChat ? workspace.leadName ?? "Lead" : section}</h1>}
         {workspace.focus && isChat && <span className="so-focus-label" title={workspace.focus.title}>{workspace.focus.title}</span>}
         <CommandMenu workspace={workspace} />
         {isChat && <Button variant="secondary" size="sm" className="so-phone-work-button" onClick={() => setPhoneView("work")}>{hasWork ? "Open work" : "Crew"}</Button>}

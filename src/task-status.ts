@@ -10,6 +10,7 @@
  * doesn't undo the outcome (a pull request that couldn't open, shortened
  * output) is an amber note on its own row with one action; the exact
  * technical reason stays one tap away in `why`. */
+import { DEFAULT_LEAD_NAME } from "./lead-identity.js";
 import type { AssignmentSnapshot } from "./assignment.js";
 import { CODE_NEED, NEEDS, needSentence, waitSentence, type NeedAction, type NeedContext, type NeedKey, type WaitKey } from "./needs-you.js";
 export type { NeedKey, WaitKey } from "./needs-you.js";
@@ -86,6 +87,8 @@ export type TaskStatusFacts = {
   /** The person's lead took this on (lead-voice.ts): "on-it" reads "Your lead is on it" and needs nobody; "lapsed"
    * (two hours without a lead act) is back with the person, and says so. */
   lead?: "on-it" | "lapsed" | null;
+  /** What the person calls their lead (Settings → Lead); "Lead" when unnamed. */
+  leadName?: string;
 };
 
 const short = (sha: string | null): string | null => sha !== null && /^[a-f0-9]{7,40}$/.test(sha) ? sha.slice(0, 7) : null;
@@ -199,16 +202,16 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
 }
 
 /** What the lead's claim says, in place of "waits for you" (lead-voice.ts). */
-export const LEAD_ON_IT = "Your lead is on it.";
-export const LEAD_LAPSED = "Your lead hasn't acted on this for 2 hours, so it's back with you.";
+export const leadOnIt = (name: string = DEFAULT_LEAD_NAME): string => `${name} is on it.`;
+export const leadLapsed = (name: string = DEFAULT_LEAD_NAME): string => `${name} hasn't acted on this for 2 hours, so it's back with you.`;
 /** The headlines a lead's claim speaks for: the ones that would otherwise wait on a person. */
 const LEAD_HEADLINES: ReadonlySet<Headline> = new Set(["Needs you", "Failed", "Ready for review", "Stopped"]);
 
 function leadSentence(headline: Headline, facts: TaskStatusFacts): string {
   const sha = short(facts.checks?.head ?? null);
   // A failed check stays said: the claim changes who acts next, never the result.
-  if (headline === "Failed" && facts.checks?.status === "failed") return `${facts.checks.level === "quick" ? "Quick checks" : "Checks"} failed${sha === null ? "" : ` on ${sha}`}. ${LEAD_ON_IT}`;
-  return LEAD_ON_IT;
+  if (headline === "Failed" && facts.checks?.status === "failed") return `${facts.checks.level === "quick" ? "Quick checks" : "Checks"} failed${sha === null ? "" : ` on ${sha}`}. ${leadOnIt(facts.leadName)}`;
+  return leadOnIt(facts.leadName);
 }
 
 export function taskStatusOf(facts: TaskStatusFacts): TaskStatus {
@@ -220,7 +223,7 @@ export function taskStatusOf(facts: TaskStatusFacts): TaskStatus {
   const need = headline === "Needs you" ? { key: facts.need ?? "other", action: NEEDS[facts.need ?? "other"].action } : null;
   const ownWords = need !== null && (need.key === "other" || need.key === "review-result") && facts.action != null;
   const primaryAction = need === null || ownWords ? facts.action ?? null : { label: need.action.label, href: facts.action?.href ?? null };
-  const sentence = lead === "on-it" ? leadSentence(headline, facts) : lead === "lapsed" ? `${LEAD_LAPSED} ${sentenceOf(headline, facts)}` : sentenceOf(headline, facts);
+  const sentence = lead === "on-it" ? leadSentence(headline, facts) : lead === "lapsed" ? `${leadLapsed(facts.leadName)} ${sentenceOf(headline, facts)}` : sentenceOf(headline, facts);
   return { headline, tone: HEADLINE_TONE[headline], sentence, details: detailsOf(headline, facts),
     primaryAction, why: [...new Set(facts.why ?? [])].filter(one => one.trim() !== ""), need };
 }
