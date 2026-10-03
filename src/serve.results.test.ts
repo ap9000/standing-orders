@@ -20,7 +20,7 @@ import { storeEvidence } from "./evidence.js";
 import { sealVerificationReceipt } from "./verification-evidence.js";
 import { createDecisionServer, reviewPriorityOf, rankReviewQueue, withinSignedTouches, diffFileAnchor, reviewFilePriority, orderChangedFiles, type ReviewQueueFacts, type ReviewFileRow } from "./serve.js";
 import type { MateProviderAnswer } from "./converse.js";
-import { resultFactsFromHtml } from "./result-review.js";
+import { resultFactsFromHtml, resultReturnTarget } from "./result-review.js";
 import { Window } from "happy-dom";
 import { validateTaskText, TASK_TEXT_LIMITS } from "./task-text.js";
 import { presented, T0, stylesOf, renderedHtmlOf, workspaceOf, revisionIdOf, plannerKeptTerms, revisionFormOf } from "../test/serve-kit.js";
@@ -102,7 +102,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       checkLog?: string;
       screenshot?: { path: string; caption: string };
       verdict?: { verdict: "verified" | "attested" | "short" | "refuted"; reasons?: string[]; matrix?: import("./proof.js").CriterionMatrixRow[]; machineVerdict?: "verified" | "attested" | "short" | "refuted" };
-      outcome?: "built" | "no-change";
+      outcome?: "built" | "no-change" | "failed";
+      reason?: string;
       finishedAt?: Date;
     } = {},
   ): number => {
@@ -137,8 +138,8 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
       store.saveProofVerdict(run, parts.verdict.verdict, parts.verdict.reasons ?? [], when, parts.verdict.matrix ?? [], parts.verdict.machineVerdict ?? null);
     }
     store.recordOutcomeFacts(run, { headRevision: "b".repeat(40), handoff: `handoff of ${id}` });
-    store.finishRun(run, { outcome: parts.outcome ?? "built", committed: true, now: when });
-    store.setTaskState(id, "done", when);
+    store.finishRun(run, { outcome: parts.outcome ?? "built", committed: true, now: when, ...(parts.reason === undefined ? {} : { reason: parts.reason }) });
+    store.setTaskState(id, parts.outcome === "failed" ? "failed" : "done", when);
     return run;
   };
 
@@ -1150,6 +1151,120 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(after.runChecks).toBeNull();
     expect(after.acts).toEqual({ primary: "checks-running", secondary: "accept", line: null });
     expect(after.decision).toMatchObject({ label: "Accept without checks", ready: false });
+  });
+
+  test("a failed build has a working result page: what it missed, its diff and checks, Retry with the suggestion, and Run checks that stays put", async () => {
+    const statement = "No reference to LEGACY remains in the codebase.";
+    const patch = "diff --git a/src/flag.ts b/src/flag.ts\n--- a/src/flag.ts\n+++ b/src/flag.ts\n@@ -1,2 +1 @@\n-export const LEGACY = true;\n export const NEXT = true;\n";
+    const run = build("t-fail", seed("t-fail", "Retire the flag", "/repo/main", { acceptance: [{ id: "c1", statement, evidence: ["changed-path"] }] }), {
+      patch, stat: [{ path: "src/flag.ts", additions: 0, deletions: 1 }], handoff: { conclusion: "Removed the flag from src/flag.ts." },
+      verdict: { verdict: "refuted", reasons: [], matrix: [row("c1", statement, "failed", [{ kind: "changed-path", ref: "src/flag.ts" }],
+        ['criterion "c1" is marked met, but caveat 1 admits an exception to it: c1: src/admin.ts still reads LEGACY for the override toggle.'])] },
+      outcome: "failed", reason: "acceptance",
+    });
+    await boot();
+    store.setVerifyCommand({ repo: "/repo/main", command: "npm test", timeoutMs: 300_000, approvedBy: "alex" }, new Date());
+    const cookie = await login();
+    const suggestion = "Before handing off, make sure no reference to LEGACY remains in the codebase.";
+    const page = `/review?result=t-fail&run=${run}`;
+    // The task card names the miss, its evidence line and the build's page; Retry's note starts with the suggestion.
+    const task = workspaceOf(await (await fetch(url("/t/t-fail"), { headers: { cookie } })).text()).view as import("./browser-workspace.js").BrowserTaskView;
+    expect(task.failure).toEqual({ line: `Missed a requirement: ${statement}`, evidence: "The agent's own note says: src/admin.ts still reads LEGACY for the override toggle.",
+      suggestion, link: { label: `See build #${run}`, href: page } });
+    expect(task.retry).toEqual({ action: "/t/t-fail/requeue", note: suggestion });
+    // No status row leads to Chat: Run checks is in place, posting here and coming back here.
+    expect(JSON.stringify(task.status)).not.toContain("/chat?");
+    expect(task.runChecks).toEqual({ action: `/r/${run}/checks`, level: "full", returnTo: "/t/t-fail" });
+    expect(task.status!.status.details.find(one => one.key === "checks")?.action).toEqual({ label: "Run checks", href: `/r/${run}/checks` });
+
+    // /r/<id> opens that page; the page is there, with the diff, the checks and the failure, and no Accept.
+    const redirected = await fetch(url(`/r/${run}`), { headers: { cookie }, redirect: "manual" });
+    expect(redirected.headers.get("location")).toBe(page);
+    expect((await fetch(url(`/r/${run}?record=1`), { headers: { cookie } })).status).toBe(200);
+    const read = async () => ((await (await fetch(url(`${page}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const selected = (await read()).selected!;
+    expect(selected.status).toMatchObject({ label: "Failed" });
+    expect(selected.panel!.status).toMatchObject({ headline: "Failed", sentence: `Missed a requirement: ${statement}` });
+    // What it missed is said once, plainly: the recorded wording isn't repeated as a caveat.
+    expect(selected.panel!.attention.join(" ")).not.toContain("caveat 1 admits");
+    expect(selected.failure).toEqual({ line: `Missed a requirement: ${statement}`, evidence: task.failure!.evidence, suggestion, link: null, retry: { action: "/t/t-fail/requeue", note: suggestion } });
+    // The Requirements row says what failed, in a count: never "Unverified".
+    expect(selected.panel!.status!.details.find(one => one.key === "requirements")).toMatchObject({ text: "1 missed", mark: "failed" });
+    expect(selected.acts).toEqual({ primary: "retry", secondary: "run-checks", line: null });
+    expect(selected.decision).toBeNull();
+    expect(selected.complete).toBeNull();
+    expect(selected.panel!.views.find(one => one.key === "changes")!.html).toContain("src/flag.ts");
+    expect(selected.panel!.views.some(one => one.key === "checks")).toBe(true);
+    expect(JSON.stringify(selected.panel!.status)).not.toContain("/chat?");
+
+    // Run checks from the task page comes back to the task page; from here it stays on this page's Checks.
+    const csrf = csrfOf(await (await fetch(url("/t/t-fail"), { headers: { cookie } })).text());
+    const fromTask = await post(cookie, task.runChecks!.action, { csrf, level: "full", return: task.runChecks!.returnTo });
+    expect(fromTask.status).toBe(303);
+    expect(fromTask.headers.get("location")).toBe("/t/t-fail");
+    expect((await read()).selected!.acts).toEqual({ primary: "retry", secondary: "checks-running", line: null });
+    expect(selected.runChecks).toEqual({ action: `/r/${run}/checks`, level: "full", returnTo: `${page}&tab=checks` });
+    const again = await post(cookie, selected.runChecks!.action, { csrf, level: "full", return: selected.runChecks!.returnTo });
+    expect(again.headers.get("location")).toBe(`${page}&tab=checks#follow-ups`);
+    // Only this run's own task page is a way back; another task's page is not.
+    expect(resultReturnTarget("/t/t-fail", run, ["t-fail"])).toBe("/t/t-fail");
+    expect(resultReturnTarget("/t/t-other", run, ["t-fail"])).toBe(`/r/${run}`);
+    expect(resultReturnTarget("/t/t-fail", run)).toBe(`/r/${run}`);
+
+    // Retried, the task moves on; the build's page still opens, now without Retry.
+    expect((await post(cookie, "/t/t-fail/requeue", { csrf })).status).toBe(303);
+    const after = (await read()).selected!;
+    expect(after.failure).toMatchObject({ line: `Missed a requirement: ${statement}`, retry: null });
+    expect(after.acts.primary).not.toBe("retry");
+  });
+
+  test("a failed task's delivered result reads Failed: Retry is the ink act, and Accept anyway, in outline, takes a reason", async () => {
+    const patch = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n";
+    const run = build("t-builtfail", seed("t-builtfail", "Built, then the task failed"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }], verdict: { verdict: "verified" } });
+    store.setTaskState("t-builtfail", "failed", T0);
+    await boot();
+    const cookie = await login();
+    const page = `/review?result=t-builtfail&run=${run}`;
+    expect((await fetch(url(`/r/${run}`), { headers: { cookie }, redirect: "manual" })).headers.get("location")).toBe(page);
+    const read = async () => ((await (await fetch(url(`${page}&format=workspace`), { headers: { cookie } })).json()) as import("./browser-workspace.js").BrowserWorkspace).view as import("./browser-workspace.js").BrowserResultView;
+    const selected = (await read()).selected!;
+    // The Failed reading, with what went wrong as its sentence and Retry's note holding what to change.
+    expect(selected.status.label).toBe("Failed");
+    expect(selected.panel!.status).toMatchObject({ headline: "Failed", sentence: selected.failure!.line });
+    expect(selected.failure!.line).not.toBe("");
+    expect(selected.failure!.retry).toEqual({ action: "/t/t-builtfail/requeue", note: selected.failure!.suggestion });
+    // Retry is the ink act; Accept is only the outline Accept anyway, posting this exact result with a reason.
+    expect(selected.acts).toEqual({ primary: "retry", secondary: "accept-anyway", line: null });
+    expect(selected.decision).toBeNull();
+    expect(selected.complete).toBeNull();
+    expect(selected.failure!.acceptAnyway).toEqual({ action: "/t/t-builtfail/accept-proof", run, returnTo: page });
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { ResultView } = await import("./browser/views/result-view.js");
+    // The page renders in a browser: it reads its own origin.
+    const shown = await read();
+    const global = globalThis as { window?: unknown };
+    global.window = { location: { origin: "http://127.0.0.1" } };
+    const rendered = (() => { try { return renderToStaticMarkup(createElement(ResultView, { view: shown, csrf: "token" })); } finally { delete global.window; } })();
+    const decision = rendered.split("data-result-decision=")[1]!.split("</section>")[0]!;
+    expect(decision.startsWith(`"retry"`)).toBe(true);
+    expect(decision).toMatch(/<form data-retry="true"[^>]*action="\/t\/t-builtfail\/requeue"/);
+    expect(decision.indexOf("data-retry")).toBeLessThan(decision.indexOf("data-accept-anyway"));
+    const anyway = decision.split("data-accept-anyway")[1]!.split("</form>")[0]!;
+    expect(anyway).toContain("Accepting needs a reason");
+    expect(anyway).toMatch(/<input(?=[^>]*\bname="note")(?=[^>]*\brequired)[^>]*>/);
+    expect(anyway).toMatch(/data-act="accept-anyway"[^>]*>.*Accept anyway<\/button>/);
+    expect(anyway).not.toContain("data-ink-act");
+    // Without a reason it is refused; with one it is accepted and the page comes back without the act.
+    const csrf = csrfOf(await (await fetch(url("/t/t-builtfail"), { headers: { cookie } })).text());
+    expect((await post(cookie, "/t/t-builtfail/accept-proof", { csrf, run: String(run), return: page })).status).toBe(400);
+    expect(store.proofAcceptance(run)).toBeNull();
+    const accepted = await post(cookie, "/t/t-builtfail/accept-proof", { csrf, run: String(run), return: page, note: "The flag stays for one release on purpose." });
+    expect(accepted.status).toBe(303);
+    expect(store.proofAcceptance(run)).toMatchObject({ note: "The flag stays for one release on purpose." });
+    const after = (await read()).selected!;
+    expect(after.failure!.acceptAnyway ?? null).toBeNull();
+    expect(after.acts.secondary).not.toBe("accept-anyway");
   });
 
   test("a missing or unreadable proof reads Accept without checks, and Accept never posts publish", async () => {

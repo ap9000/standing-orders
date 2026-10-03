@@ -114,6 +114,60 @@ const DEMO_HANDOFF = {
   decisionsIncorporated: [],
 };
 
+/** The failed demo build: it took the flag out of settlement and config, but
+ * not out of the admin override, and its own report says so. */
+const DEMO_FAILED_PATCH = `diff --git a/src/payout.ts b/src/payout.ts
+index 7c1d2e3..5a1f0c7 100644
+--- a/src/payout.ts
++++ b/src/payout.ts
+@@ -18,9 +18,5 @@ export function settleAll(rows: PayoutRow[]): number {
+-  if (config.LEGACY_PAYOUT) {
+-    return rows.reduce((sum, row) => sum + legacySettle(row), 0);
+-  }
+-
+-  return rows.reduce((sum, row) => sum + settle(row.cents, row.rate), 0);
++  return rows.reduce((sum, row) => sum + settle(row.cents, row.rate), 0);
+ }
+diff --git a/src/config.ts b/src/config.ts
+index 2b3c4d5..8e9f0a1 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -4,8 +4,6 @@ export const config = {
+   PAYOUT_BATCH_SIZE: 500,
+-  // Retired once every merchant is on the new settlement path.
+-  LEGACY_PAYOUT: process.env.LEGACY_PAYOUT === "1",
+   PAYOUT_CURRENCY: "USD",
+ };
+`;
+
+const DEMO_FAILED_HANDOFF = {
+  schema: 1,
+  outcome: "built",
+  committed: true,
+  conclusion: "Removed LEGACY_PAYOUT from settlement and config. The admin override still reads it, so one reference remains.",
+  changes: ["Dropped the legacy settlement branch in src/payout.ts.", "Removed the LEGACY_PAYOUT flag from src/config.ts."],
+  verification: ["Searched the codebase for LEGACY_PAYOUT after the change."],
+  followUps: [],
+  decisionsIncorporated: [],
+};
+
+const DEMO_FAILED_PROOF = {
+  version: 1 as const,
+  criteria: [
+    {
+      id: "c1",
+      statement: "No reference to LEGACY_PAYOUT remains in the codebase.",
+      verdict: "met" as const,
+      how: "Removed the flag and the settlement branch behind it.",
+      evidence: [{ kind: "changed-path" as const, ref: "src/payout.ts" }, { kind: "changed-path" as const, ref: "src/config.ts" }],
+    },
+  ],
+  checks: [],
+  changed: ["src/payout.ts", "src/config.ts"],
+  caveats: ["c1: src/admin/overrides.ts still reads LEGACY_PAYOUT for the per-merchant override toggle, so one reference remains."],
+  screenshots: [],
+};
+
 /** The evidence bundle's own manifest (Acceptance Contract v2 demo): the
  * seeded sandbox answers its OWN signed rubric by exact id, with typed
  * evidence references — the same shape a real builder writes — so a
@@ -564,14 +618,15 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
 
   // The board's "building" lane keys off a live claim — take one through
   // the real claim machinery so the card wears worker and lease honestly.
-  acquire(store, buildingRef, "night-shift-1", {
+  const liveClaim = acquire(store, buildingRef, "night-shift-1", {
     now: hoursAgo(0.4),
     token: nightShift.token,
     ttlMs: 4 * 3_600_000,
   });
   const liveRun = store.startRun({
     taskRef: buildingRef,
-    leaseId: "demo-lease-live",
+    // The claim's own lease, so the build reads as live: the run the task's current claim owns.
+    leaseId: liveClaim.ok ? liveClaim.claim.leaseId : "demo-lease-live",
     runner: "night-shift-1",
     branch: `toolroll/${building}`,
     worktree: join(repos.api, ".demo-worktree-2"),
@@ -765,6 +820,35 @@ export function seedDemo(store: Store, repos: { api: string; web: string }, evid
     now: hoursAgo(6),
     ...presentedRoute(store, store.refFor("built-in", failed).id, "builder"),
   });
+  // What the failed build left: its saved changes, its report and the
+  // machine's reading of them. It removed the flag from settlement but left
+  // the admin override reading it, and said so in its own note — so the
+  // signed requirement is missed, and the task card can name it.
+  store.stampRun(failedRun, { baseRevision: "4b825dc642cb6eb9a060e54bf8d69288fbee4904", scopeDigest: failedProposed.digest });
+  store.recordOutcomeFacts(failedRun, { headRevision: "5a1f0c7e2b9d4e6f8a0b1c2d3e4f5a6b7c8d9e0f" });
+  storeEvidence(store, evidenceRoot, failedRun, "terminal-diff", "terminal-diff.patch", Buffer.from(DEMO_FAILED_PATCH, "utf8"),
+    "git diff --no-ext-diff --no-textconv --no-color 4b825dc6..HEAD (exit 0) [demo: synthetic]", hoursAgo(5.6));
+  const failedStat: DiffStat = {
+    schema: 1, base: "4b825dc642cb6eb9a060e54bf8d69288fbee4904", head: "5a1f0c7e2b9d4e6f8a0b1c2d3e4f5a6b7c8d9e0f",
+    fileCount: 2, additions: 1, deletions: 7, binaryCount: 0,
+    files: [{ path: "src/payout.ts", additions: 1, deletions: 5 }, { path: "src/config.ts", additions: 0, deletions: 2 }],
+    filesTruncated: false,
+  };
+  storeEvidence(store, evidenceRoot, failedRun, "diff-stat", "diff-stat.json", budgetedStatJson(failedStat), "parsed from git diff --numstat -z [demo: synthetic]", hoursAgo(5.6));
+  storeEvidence(store, evidenceRoot, failedRun, "handoff", "handoff.json", Buffer.from(JSON.stringify(DEMO_FAILED_HANDOFF, null, 2), "utf8"), "composed at completion [demo: synthetic]", hoursAgo(5.6));
+  storeEvidence(store, evidenceRoot, failedRun, "proof", "proof.json", Buffer.from(JSON.stringify(DEMO_FAILED_PROOF, null, 2), "utf8"), "agent-authored proof (validated, re-serialized) [demo: synthetic]", hoursAgo(5.6));
+  const failedAdjudicated = adjudicate({
+    proofArtifactPresent: true,
+    proofParse: parseProof(JSON.stringify(DEMO_FAILED_PROOF)),
+    handoffPresent: true,
+    terminalDiffPresent: true,
+    terminalDiffCaptureStatus: "ok",
+    diffStat: { captured: true, truncated: false, paths: new Set(failedStat.files.map(one => one.path)) },
+    verifyCommand: { configured: false },
+    screenshots: [],
+    approvedCriteria: failedProposed.acceptance,
+  });
+  store.saveProofVerdict(failedRun, failedAdjudicated.verdict, failedAdjudicated.reasons, hoursAgo(5.5), failedAdjudicated.matrix);
   store.finishRun(failedRun, {
     outcome: "failed",
     reason: "acceptance",

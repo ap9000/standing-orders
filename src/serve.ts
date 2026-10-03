@@ -75,9 +75,9 @@ import { hasDisguisedText } from './decision.js';
 import { checkPublishing, completeAndOpenPullRequest, mergeAsPerson, pullRequestBlocker, publishingOf, saveMergeSettings, savePublishing, newestPullRequestOf, MERGE_METHODS, type MergeMethod, type PullRequestView } from './pull-request-flow.js';
 import { leadBriefHtml, LEAD_CONTEXT_CSS } from './lead-context.js';
 import { assignmentCatchUp } from './assignment-brief.js';
-import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS } from './assignment-ui.js';
-import { assignmentStageOf, pullRequestFactOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
-import { ASKS, ASK_LABEL, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, isInternalErrorReason, latestFinishedAttempt, runReasonWords, type Ask } from './needs-you.js';
+import { assignmentActionHref, assignmentCardOf, assignmentStatusOf, assignmentSummaryHtml, assignmentWithEvidence, ASSIGNMENT_CSS, type AssignmentCard } from './assignment-ui.js';
+import { assignmentStageOf, demoChecksOf, pullRequestFactOf, requirementsOf, stageOfCode, stageOfDispatch, statusDetailsHtml, statusIconSvg, statusWhyHtml, taskStatusOf, TASK_STATUS_CSS, type PullRequestFact, type TaskStatus } from './task-status.js';
+import { ASKS, ASK_LABEL, GENERAL_SUGGESTION, NEEDS, NO_REASON_RECORDED, failedAttemptSentence, retryNoteOf, failingCheckSuggestion, isInternalErrorReason, latestFinishedAttempt, missedRequirementLine, missedRequirementSuggestion, runReasonWords, stopSuggestionOf, type Ask, type FailureExplanation } from './needs-you.js';
 import { assignmentPresentationOf, historicalAssessmentReason, shortenedMaterialReason } from './assignment-presentation.js';
 import type { TaskFamily } from "./store.js";
 import { ledgerBody } from "./ledger-view.js";
@@ -169,7 +169,7 @@ import { recipeFromForm, recipeLibraryHtml, recipeEditorHtml, workflowPreviewHtm
 import { EVIDENCE_CAPS, readVerifiedArtifact, readVerifiedReport, readVerifiedProofForRun, storeEvidence, writeEvidenceFile, scanForSecrets, type ReportView } from "./evidence.js";
 import { GOAL_ASSESSMENT_PENDING, reviewConflict, manualReviewOnly, manualReviewCriterionOf, personCheckWords, plainReasonWords, dispatchStatusToken, passFraction, semanticCoverage, coverageWords, coverageStateWords, type ProofVerdict, type CriterionMatrixRow, type CriterionEvidenceRef } from "./proof.js";
 import {
-  WORK_VIEWS, REVIEW_TOKENS, RESULT_DECISION_SENTENCE, acceptWordsOf, cantAcceptYetOf, evidenceProblemOf, lastErrorLineOf, reportMismatchesOf, ACCEPT_NEEDS_REASON, MISMATCH_HEADLINE, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
+  WORK_VIEWS, REVIEW_TOKENS, RESULT_DECISION_SENTENCE, acceptWordsOf, buildProgressOf, cantAcceptYetOf, earlierAttemptsWords, evidenceProblemOf, lastErrorLineOf, missedRequirementOf, reportMismatchesOf, ACCEPT_NEEDS_REASON, MISMATCH_HEADLINE, parseWorkView, resultStatusOf, resultHeadlineOf, receiptHeadingOf, receiptPublicationWords, reviewFactsOf, workStatusOf, primaryDestinationOf, needsPerson, dispatchActionLabel,
   type WorkView, type WorkFacts, type WorkStatus, type DisplayStatus, type PublicationFacts, type ReviewFacts,
 } from "./workspace-ui.js";
 import { PRICED_BUILD_MODELS } from "./pricing.js";
@@ -2265,6 +2265,27 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         if (error instanceof WorkIndexCursorError) return refuse(response, who, 400, 'This task page has expired. Open the first page.', '/work');
         throw error;
       }
+      // A failed row says what its latest attempt missed, as its task page does (a stop reason already reads so), from
+      // the database alone: a row reads no check log. A live build's row says which step it is on, or the step it is
+      // stuck on, from that live attempt's own progress only, never a stopped attempt's; the step's words come from its
+      // current plan (one saved file, for live rows only), and without it the row names the step by number.
+      work = { ...work, items: work.items.map((item): WorkIndexItem & { progress?: string } => {
+        if (item.liveRunId !== null) {
+          const ref = store.lookupRef(item.activeTaskId);
+          const recorded = ref === null ? null : store.latestCheckpointForRun(item.liveRunId);
+          if (ref === null || recorded === null || recorded.taskRef !== ref.id) return item;
+          const plan = store.currentPlanRevision(ref.id);
+          const parsed = plan === null ? null : (() => { const doc = revisionDocOf(plan); return doc === null ? null : parseExecutionPlanDocument(doc.document); })();
+          const words = new Map(parsed?.ok === true ? milestonesOf(parsed.document).map(one => [one.id, one.description] as const) : []);
+          const steps = buildProgressOf(recorded.snapshot.milestones.map(one => ({ description: words.get(one.id) ?? null, state: one.state, note: one.note ?? null })));
+          return steps === null ? item : { ...item, progress: steps.line };
+        }
+        if (item.state !== "failed") return item;
+        const family = familyOf(item.activeTaskId);
+        if (family === null || family.problem !== null) return item;
+        const failure = failureOf(family.versions.flatMap(version => store.runsFor(version.refId)), null, false);
+        return failure.kind === "reason" ? item : { ...item, status: { ...item.status, detail: failure.line } };
+      }) };
       const page = workPage(chromeFor(project, "work", undefined, rollup ? "all" : undefined), {
         view,
         ...(url.searchParams.has('project') && project !== null ? { projectFilter: project } : {}),
@@ -2592,21 +2613,49 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       // The ranked queue itself stays bounded and says so.
       const beyond = wantedId === null || inQueue !== null ? null : completedRowFor(wantedId, project);
       const beyondRow = beyond === null ? null : resultRow(beyond);
-      const chosen = inQueue ?? (beyondRow === null ? null : { ...beyondRow, priority: reviewPriorityOf(beyondRow) });
+      const completedChoice = inQueue ?? (beyondRow === null ? null : { ...beyondRow, priority: reviewPriorityOf(beyondRow) });
+      const expectedRun = url.searchParams.get("run");
+      const namedRun = expectedRun !== null && /^[1-9]\d*$/.test(expectedRun) ? Number(expectedRun) : null;
+      // A build that failed (or stopped) has its own result page too: the run named, or a failed task's latest attempt.
+      const attempt = wantedId === null || (completedChoice !== null && (namedRun === null || completedChoice.runId === namedRun)) ? null : attemptRowFor(wantedId, namedRun, project);
+      const attemptRow = attempt === null ? null : resultRow(attempt);
+      const chosen = attemptRow !== null ? { ...attemptRow, priority: reviewPriorityOf(attemptRow) } : completedChoice;
       const selectedRow = wantedId === null ? ranked[0] ?? null : chosen;
       const csrf = who.via === "cookie" ? who.session.csrf : "";
-      const expectedRun = url.searchParams.get("run");
       // An exact link to a result this person can't see (or that never existed) reads the same either way.
       if (expectedRun !== null && wantedId !== null && chosen === null) return refuse(response, who, 404, "No such result in your projects.", "/work");
       if (expectedRun !== null && (!/^[1-9]\d*$/.test(expectedRun) || selectedRow?.runId !== Number(expectedRun))) {
         return sendScreen(response, 409, screen("Result changed", '<h1>Result changed</h1><p>This acceptance link no longer matches the current result. Review the current task before accepting.</p><p class="refusal-back"><a class="button-link" href="/review">Review results</a></p>', { chrome: chromeFor(project, "runs") }));
       }
       const selected = selectedRow === null ? null : reviewCockpitViewOf(selectedRow, who, now);
+      // A build that delivered nothing reads Failed here, and so does a failed task's delivered result: what went wrong
+      // is the card and Retry the ink act. That result may still be accepted, but only in outline, as Accept anyway, with
+      // a reason.
+      const delivered = selected?.run?.outcome === "built" || selected?.run?.outcome === "no-change";
+      const failedTask = selected === null ? null : store.getTask(selected.taskId);
+      if (selected !== null && attemptRow !== null && selected.run !== null && (!delivered || failedTask?.state === "failed")) {
+        const attemptRun = store.getRun(selected.run.id);
+        const runs = attemptRun === null ? [] : store.runsFor(attemptRun.taskRef);
+        const latest = latestFinishedAttempt(runs);
+        // Retry from here only when the task failed, nothing holds it, and this is its latest attempt or a result it delivered.
+        const retry = failedTask?.state === "failed" && (latest?.id === selected.run.id || delivered) && csrf !== "" && who.role === "approver" && store.currentLiveLease(attemptRun!.taskRef, now) === null
+          ? { action: `${taskHref(selected.taskId)}/requeue` } : null;
+        // Accept anyway: the same acceptance this task's latest result takes, never for an older one or one already accepted.
+        const family = delivered ? familyOf(selected.taskId) : null;
+        const acceptAnyway = delivered && csrf !== "" && family?.current.id === selected.taskId && family.problem === null &&
+          runs.find(runIsTaskResult)?.id === selected.run.id && store.proofAcceptance(selected.run.id) === null
+          ? { action: `${taskHref(selected.taskId)}/accept-proof`, run: selected.run.id } : null;
+        if (attemptRun !== null) {
+          // A delivered result didn't fail itself: the task's failure is its latest attempt's.
+          const failure = delivered ? failureOf(runs, null) : explainAttempt(attemptRun, null);
+          selected.failure = { ...failure, retry: retry === null ? null : { ...retry, note: retryNoteOf(failure.suggestion) }, ...(acceptAnyway === null ? {} : { acceptAnyway }) };
+        }
+      }
       const reviewPage = reviewCockpitPage(chromeFor(wantedId === null ? project : chosenProject, "runs"), {
           queue: ranked,
           queueCap: REVIEW_QUEUE_CAP,
           selected,
-          beyondQueue: beyond !== null,
+          beyondQueue: beyond !== null && attemptRow === null,
           // A deep link to a result this console cannot show — not done,
           // not admitted, or never existed — says so in one sentence and
           // shows the top of the queue; the three cases read identically.
@@ -3287,6 +3336,11 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       // waits there under Details, and here with ?record=1.
       if (url.searchParams.get("record") === null && !running && found.role === "builder" && (found.outcome === "built" || found.outcome === "no-change") &&
           completedRowFor(taskId, null)?.runId === found.id) {
+        const tab = parseResultTab(url.searchParams.get("tab"));
+        return redirect(response, `${reviewHref(taskId, found.id)}${tab === "summary" ? "" : `&tab=${tab}`}`);
+      }
+      // A build that failed or stopped opens on its own result page too: its changes, its checks and what went wrong.
+      if (url.searchParams.get("record") === null && !running && (found.role === "builder" || found.role === "scout") && attemptRowFor(taskId, found.id, null) !== null) {
         const tab = parseResultTab(url.searchParams.get("tab"));
         return redirect(response, `${reviewHref(taskId, found.id)}${tab === "summary" ? "" : `&tab=${tab}`}`);
       }
@@ -6017,6 +6071,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       // available, computed fresh only when this call has no `who`.
       planRevisions,
       milestoneProgress: view?.milestoneProgress ?? progressOf(ref.id, planRevisions?.current?.document ?? null),
+      // What a failed task missed, said as the task page says it.
+      failure: task.state === "failed" ? failureOf(family.versions.flatMap(version => store.runsFor(version.refId)), view?.assignment ?? assignmentOf(store, task.id, now, workAccess(), evidenceRoot)) : null,
       claimed: view?.claimed ?? store.hasLiveClaim(ref.id, now),
       liveRun: live === null ? null : { id: live.id, runner: live.runner, startedAt: live.startedAt, phase: live.phase },
       checkProgress: view?.checkProgress ?? (live === null && latest === null ? null : store.checkProgress((live ?? latest)!.id)),
@@ -6080,26 +6136,61 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     return { taskId: rootId, view: null, offer: { taskId: receipt.taskId, runId: receipt.runId, digest: receipt.digest }, target };
   }
 
-  /** What went wrong with the latest finished attempt (whatever its outcome, never an older failure), in one line: a
-   * failing check's last error line (linked to that line in its saved log), else the attempt's recorded reason in plain
-   * words, else that no reason was recorded. A reason that is machine output reads as an internal error, its detail
-   * behind a link to that line of the attempt's record; nothing links to this task's own page. */
-  function failureOf(runs: readonly Run[], assignment: AssignmentSnapshot | null): { line: string; link: { label: string; href: string } | null } {
+  /** What went wrong with the latest finished attempt (whatever its outcome, never an older failure). */
+  function failureOf(runs: readonly Run[], assignment: AssignmentSnapshot | null, readLog = true): FailureExplanation {
     const last = latestFinishedAttempt(runs);
-    if (last === null) return { line: NO_REASON_RECORDED, link: null };
-    const receipt = assignment?.receipt?.runId === last.id ? assignment.receipt : null;
-    if (receipt !== null && receipt.checks.status === "failed" && receipt.checks.logArtifactId !== null) {
-      const artifact = store.artifactsFor(last.id).find(one => one.id === receipt.checks.logArtifactId) ?? null;
+    if (last === null) return { kind: "reason", line: NO_REASON_RECORDED, evidence: null, suggestion: GENERAL_SUGGESTION, link: null };
+    const full = store.getRun(last.id);
+    return full === null ? { kind: "reason", line: failedAttemptSentence(last.reason), evidence: null, suggestion: stopSuggestionOf(last.reason), link: null }
+      : explainAttempt(full, assignment?.receipt?.runId === last.id ? assignment.receipt : null, readLog);
+  }
+
+  /** One finished attempt's failure in plain words: a failing check's last error line (linked to that line in its
+   * saved log), else the first signed requirement it missed with the evidence line behind it, else its recorded reason
+   * in plain words (or that none was recorded). Each comes with one suggestion of what to change, and a link to the
+   * attempt's own result page, where its changes, checks and failure are; machine output reads as an internal error,
+   * its detail behind a link to that line of the attempt's record. `readLog` false (a list's rows) reads no saved
+   * check log: the requirement or the reason, from the database alone. */
+  function explainAttempt(run: Run, receipt: AssignmentSnapshot["receipt"] | null, readLog = true): FailureExplanation {
+    const taskId = store.externalIdFor(run.taskRef) ?? "";
+    const page = `${reviewHref(taskId)}&run=${run.id}`;
+    const see = taskId === "" ? null : { label: `See build #${run.id}`, href: page };
+    const artifacts = store.artifactsFor(run.id);
+    const logArtifact = !readLog ? null : receipt?.checks.status === "failed" && receipt.checks.logArtifactId !== null
+      ? artifacts.find(one => one.id === receipt.checks.logArtifactId) ?? null
+      : [...artifacts].reverse().find(one => one.kind === "check-log") ?? null;
+    if (logArtifact !== null) {
       let read: ReturnType<typeof readVerifiedArtifact> | null = null;
-      try { read = artifact === null ? null : readVerifiedArtifact(evidenceRoot, artifact); } catch { read = null; }
-      const found = read !== null && read.ok ? lastErrorLineOf(read.content.toString("utf8")) : null;
+      try { read = readVerifiedArtifact(evidenceRoot, logArtifact); } catch { read = null; }
+      const text = read !== null && read.ok ? read.content.toString("utf8") : null;
+      const exit = text === null ? null : /^\(exit (-?[0-9]+)\)$/m.exec(text);
+      const failedCheck = receipt?.checks.status === "failed" || (exit !== null && exit !== undefined && Number(exit[1]) !== 0);
+      const found = text !== null && failedCheck ? lastErrorLineOf(text) : null;
       if (found !== null) {
-        return { line: oneLineOf(found.text, 140), link: { label: `Check output, line ${found.line}`,
-          href: `${reviewHref(receipt.taskId)}&run=${last.id}&tab=checks#check-log-L${found.line}` } };
+        const line = oneLineOf(found.text, 140);
+        return { kind: "check", line: `The check failed: ${line}`, evidence: null, suggestion: failingCheckSuggestion(line),
+          link: taskId === "" ? null : { label: `Check output, line ${found.line}`, href: `${page}&tab=checks#check-log-L${found.line}` } };
       }
     }
-    return { line: failedAttemptSentence(last.reason),
-      link: isInternalErrorReason(last.reason) ? { label: "The recorded error", href: `/r/${last.id}?record=1#run-reason-detail` } : null };
+    const verdict = store.proofVerdictFor(run.id);
+    const missed = verdict === null ? null : missedRequirementOf(verdict.matrix);
+    if (missed !== null) {
+      return { kind: "requirement", line: missedRequirementLine(missed.statement), evidence: missed.evidence === null ? null : oneLineOf(missed.evidence, 240),
+        suggestion: missedRequirementSuggestion(missed.statement), link: see };
+    }
+    const internal = isInternalErrorReason(run.reason);
+    return { kind: "reason", line: failedAttemptSentence(run.reason), evidence: null, suggestion: stopSuggestionOf(run.reason),
+      link: internal ? { label: "The recorded error", href: `/r/${run.id}?record=1#run-reason-detail` } : see };
+  }
+
+  /** Run checks in place on a result's commit: an approver's browser session, outside the demo, when the project has a
+   * check and none is waiting or running on it. Comes back to `returnTo`. */
+  function runChecksHere(runId: number | null, who: Who, returnTo: string): { action: string; level: "quick" | "full"; returnTo: string } | null {
+    if (runId === null || who.via !== "cookie" || who.role !== "approver" || store.isDemo()) return null;
+    const run = store.getRun(runId);
+    const followUps = run === null ? null : followUpsFor(store, evidenceRoot, run, clock());
+    if (followUps === null || !(followUps.quick || followUps.full) || followUps.checks.some(one => one.state === "waiting" || one.state === "running")) return null;
+    return { action: `/r/${runId}/checks`, level: followUps.full ? "full" : "quick", returnTo };
   }
 
   function taskScreen(
@@ -6131,6 +6222,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
     }
     // What went wrong reads the family's latest finished attempt, as the Tasks row does.
     presentedData.failure = failureOf(presentedData.family?.runs ?? data.runs, data.assignment ?? null);
+    presentedData.runChecks = runChecksHere(data.assignment?.receipt?.runId ?? null, who, taskHref(taskId));
+    presentedData.demo = store.isDemo();
     const paneProject = restricted() ? store.lookupRef(taskId)?.repo ?? null : who.via === "cookie" ? who.session.project : null;
     const page = taskPage(
       paneProject === null && !unscopedMode
@@ -9754,7 +9847,9 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       const id = Number(followUp[1]);
       const found = store.getRun(id);
       if (found === null || !visible(taskRepoOf(found.taskRef))) return refuse(response, who, 404, "no such run");
-      const back = resultReturnTarget(body.get("return"), id);
+      // The task page that offered Run checks in place is a return target too: this run's own task, or its family's root.
+      const runTask = store.externalIdFor(found.taskRef);
+      const back = resultReturnTarget(body.get("return"), id, runTask === null ? [] : [runTask, familyOf(runTask)?.root.id ?? runTask]);
       if (who.via !== "cookie") return refuse(response, who, 403, "Sign in with a browser session to do this.", back);
       if (followUp[2] === "checks") {
         if (who.role !== "approver") return refuse(response, who, 403, "An approver runs checks.", back);
@@ -9762,7 +9857,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
         const level = body.get("level") === "full" ? "full" as const : "quick" as const;
         const asked = requestFollowUpChecks(store, { runId: id, level, actor: who.name }, now);
         if (!asked.ok) return refuse(response, who, 409, asked.message, back);
-        return redirect(response, `${back.split("#")[0]}#follow-ups`);
+        // Back where it was asked: the task page's status row says the checks are running; a result page shows them under #follow-ups.
+        return redirect(response, back.startsWith("/t/") ? back : `${back.split("#")[0]}#follow-ups`);
       }
       const filed = fileAddTestsTask(store, evidenceRoot, { runId: id, actor: who.name, filedVia: "console", ...(admissionList() === null ? {} : { admittedRepos: admissionList()! }) }, now);
       if (!filed.ok) return refuse(response, who, 409, filed.message, back);
@@ -10852,6 +10948,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           }
           note = validated.note;
         }
+        // A failed task's result is accepted only anyway, on purpose: with a reason.
+        if (note === null && store.getTask(taskId)?.state === "failed") return taskScreen(response, who, taskId, "Accepting anyway needs a reason.", 400);
         store.acceptProof(latest.id, verifiedAuthor(who.name), note, now);
         return redirect(response, body.get("return") === null ? taskHref(taskId) : safeReturn(body.get("return")));
       }
@@ -11250,6 +11348,35 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           one.finishedAt !== null &&
           (one.role === "builder" || one.role === "scout"),
       ) ?? null;
+    return resultRowOf(task, ref.repo, family.problem, run);
+  }
+
+  /**
+   * A build attempt that didn't deliver a result (failed, refused, stopped,
+   * never finished) still has a result page: its changes, its checks and what
+   * went wrong. The row for one: the run named by `runId` when it is an ended
+   * builder or scout attempt of this task that isn't a delivered result, or a
+   * failed task's latest attempt; with no run named, that latest attempt. The
+   * same admission as a completed row: in this project (or none) and inside
+   * the ceiling. Null otherwise, which reads like a task that never existed.
+   */
+  function attemptRowFor(taskId: string, runId: number | null, project: string | null): CompletedWorkRow | null {
+    const family = familyOf(taskId);
+    const task = store.getTask(taskId);
+    const ref = store.lookupRef(taskId);
+    if (family === null || task === null || ref === null) return null;
+    if (!(project === null || ref.repo === null || ref.repo === project) || !visible(ref.repo)) return null;
+    const attempts = store.runsFor(ref.id).filter(one => (one.role === "builder" || one.role === "scout") && (one.finishedAt !== null || one.outcome !== null));
+    const latest = task.state === "failed" ? latestFinishedAttempt(attempts) : null;
+    const run = runId !== null ? attempts.find(one => one.id === runId) ?? null : latest;
+    // A delivered result has its completed row; a failed task's latest attempt is what failed, whatever it ended as.
+    if (run === null || runIsLive(run) || ((run.outcome === "built" || run.outcome === "no-change") && run.id !== latest?.id)) return null;
+    return resultRowOf(task, ref.repo, family.problem, run);
+  }
+
+  function resultRowOf(task: NonNullable<ReturnType<Store["getTask"]>>, repo: string | null, historyProblem: string | null, run: Run | null): CompletedWorkRow {
+    const ref = { repo };
+    const family = { problem: historyProblem };
     const publication = run === null ? null : store.publicationForRun(run.id);
     const verdict = run === null ? null : store.proofVerdictFor(run.id);
     return {
@@ -11428,6 +11555,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       intent,
       plan,
       contest: contestOf(),
+      ...(store.isDemo() ? { demo: true } : {}),
     };
     if (run === null) {
       return { ...base, run: null, detail: null, reviewRetry: null, review: null, notes: [] };
@@ -16956,6 +17084,8 @@ function approvalFormDigest(scopeDigest: string, raceDigest: string | null, plan
  * unified conversation; this is a focused lens, not a second chat silo. */
 type TaskChatFocus = {
   executionId: string;
+  /** A failed task: what its latest attempt missed and what to change (the task page's own words). */
+  failure?: FailureExplanation | null;
   /** Until this installation's first Ready result, the task shows where it stands on Plan → You approve → Build → Checks → Ready. */
   guide?: boolean;
   family: TaskFamily;
@@ -17095,13 +17225,14 @@ function checkProgressHtml(progress: CheckProgress | null, id = "check-progress"
   return `<p id="${id}" class="check-progress mono" data-check-progress data-final="${escape(state)}" role="status" aria-live="polite">${escape(progress.line)}</p>`;
 }
 
-function taskControlDetailsHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
-  const html = taskControlHtml(control, taskId, csrf, surface, inert);
+function taskControlDetailsHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false, stopElsewhere = false): string {
+  const html = taskControlHtml(control, taskId, csrf, surface, inert, stopElsewhere);
   return control.kind === "paused" || control.kind === "review-stopped" || control.kind === "stopping"
     ? `<details id="task-control-details"><summary>${control.kind === "paused" ? "Preserved work and resume" : "Stop details"}</summary>${html}</details>` : html;
 }
 
-function taskControlHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false): string {
+/** `stopElsewhere`: the Building card already carries this exact run's Stop, so the control card keeps only its details. */
+function taskControlHtml(control: TaskControlView, taskId: string, csrf: string, surface: "task" | "chat", inert = false, stopElsewhere = false): string {
   if (control.kind === "none") return "";
   const back = `<input type="hidden" name="return" value="${surface}">`;
   const guarded = csrf !== "" && !inert;
@@ -17116,7 +17247,7 @@ function taskControlHtml(control: TaskControlView, taskId: string, csrf: string,
     return (
       `<section class="card task-control" id="task-control" data-task-control="stop" data-control-run="${control.run}" aria-label="stop this attempt">` +
       `<div class="task-control-copy"><details><summary>Stop details · ${escape(role(control))} #${control.run}</summary><p class="meta">Stopping ends only this attempt's own processes. Its branch, uncommitted work, evidence, and decisions stay preserved; other tasks keep running.</p></details></div>` +
-      (guarded
+      (stopElsewhere ? "" : guarded
         ? `<form method="post" action="${taskHref(taskId)}/stop" class="inline task-control-form task-stop-form"><input type="hidden" name="csrf" value="${escape(csrf)}"><input type="hidden" name="run" value="${control.run}">${back}<button type="submit" class="danger task-control-button">Stop</button></form>`
         : `<button type="button" class="danger task-control-button" disabled>Stop</button>`) +
       `</section>`
@@ -17261,6 +17392,14 @@ function taskChatApproval(focus: TaskChatFocus, csrf: string): string {
   );
 }
 
+/** The chat's status sentence, worded as the task page words it: what a failed attempt missed, or which step a live
+ * build is on (and the step it is stuck on). Undefined keeps the shared status sentence. */
+function chatStatusSentence(focus: TaskChatFocus): string | undefined {
+  if (focus.state === "failed" && focus.failure != null) return [focus.failure.line, focus.failure.evidence].filter(Boolean).join(" ");
+  const steps = focus.liveRun === null ? null : buildProgressOf(focus.milestoneProgress);
+  return steps === null ? undefined : steps.line;
+}
+
 /** One live, server-derived journey from request to proof. The fragment is
  * safe to refresh independently, so an in-progress message is never lost. */
 function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false, inert = false, approvalHref = taskChatHref(focus.id) + "#task-chat-action"): string {
@@ -17277,7 +17416,7 @@ function taskChatLiveRegion(focus: TaskChatFocus, csrf: string, fragment = false
     `<section id="task-chat-live" aria-live="polite" data-task="${escape(focus.id)}" data-execution="${escape(focus.executionId)}" data-source="/chat/task-status?task=${encodeURIComponent(focus.id)}" data-poll="${polling ? "1" : "0"}" data-approval="${escape(focus.approval?.digest ?? "")}" data-plan="${escape(focus.plan ?? "")}">` +
     (focus.guide === true && focus.state !== "cancelled" ? firstTaskJourneyHtml(focus) : "") +
     `<div class="task-live-summary">` +
-    (focus.assignment !== null ? assignmentSummaryHtml(focus.assignment, { workStatus: focus.status, hideAction: focus.approval !== null && focus.dispatch?.action === "approve-scope", ...(receiptLeads ? { resultHref: chatResultHref(focus.id, focus.result!.runId) } : {}) }) + (receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status, focus.assignment, false) : "") : receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status) : taskStatusCard(focus.status, focus.id, focus.dispatch, focus.liveRun?.id ?? null, focus.approval !== null && focus.dispatch?.action === "approve-scope")) +
+    (focus.assignment !== null ? assignmentSummaryHtml(focus.assignment, { workStatus: focus.status, hideAction: focus.approval !== null && focus.dispatch?.action === "approve-scope", sentence: chatStatusSentence(focus), ...(receiptLeads ? { resultHref: chatResultHref(focus.id, focus.result!.runId) } : {}) }) + (receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status, focus.assignment, false) : "") : receiptLeads ? completionReceiptCard(focus.result!, focus.id, "chat", focus.status) : taskStatusCard(focus.status, focus.id, focus.dispatch, focus.liveRun?.id ?? null, focus.approval !== null && focus.dispatch?.action === "approve-scope")) +
     checkProgressHtml(focus.checkProgress) +
     // The exact-run control (v52): the SAME component the task page
     // renders, refreshed with the live region — typed input in the
@@ -18998,7 +19137,7 @@ function workPage(
         status: { label: row.status.label, tone: row.status.tone, token: row.status.token },
         ask: row.ask, group: row.ask ?? (row.status.rank === 1 ? 'building' : 'rest'),
         action: actionHref === null || row.primaryAction === null ? null : { label: row.primaryAction.label, href: actionHref },
-        detail: needsYouDetail ? row.status.detail : null,
+        detail: needsYouDetail ? row.status.detail : (row as { progress?: string }).progress ?? null,
         problem: row.familyProblem,
         notes: (row.status.diagnostics ?? []).map(one => `${one.label} · ${one.detail}`),
       };
@@ -20807,8 +20946,12 @@ function revisionLineageHtml(lineage: RevisionLineage | null): string {
 function taskBodyParts(data: {
   /** Until the first Ready result: show the task's way there (onboarding). */
   guide?: boolean;
-  /** The last attempt's recorded reason in one line and its log lines, shown when the task failed. */
-  failure?: { line: string; link: { label: string; href: string } | null } | null;
+  /** What the last attempt missed and what to change, shown when the task failed. */
+  failure?: FailureExplanation | null;
+  /** Run checks in place, for a status row that offers it. */
+  runChecks?: { action: string; level: "quick" | "full"; returnTo: string } | null;
+  /** The demo database: no check runs here, and the Checks row says so. */
+  demo?: boolean;
   assignment?: AssignmentSnapshot | null;
   checkProgress?: CheckProgress | null;
   rootId?: string;
@@ -21030,16 +21173,14 @@ function taskBodyParts(data: {
       return `<div class="card attempt-live" data-live-run="${liveRun.id}">${head}` +
         `<p class="meta">${data.degraded === "sensitive" ? "this page carries a password ceremony, so the live view stays on the build page" : "the live view is on the build page"}</p>${door}</div>`;
     }
+    // With the live file view off there is nothing live to show here: no panel (the build's own page says why).
+    if (data.peekable !== true) return "";
     const peek =
-      data.peekable === true
-        ? `<p class="meta">what is changing right now</p>` +
-          `<div id="run-peek"><p class="meta">watching\u2026 the first look lands within 15 seconds</p></div>` +
-          `<p class="meta" id="run-peek-stamp"></p>`
-        : `<p class="meta">the live file view is off \u2014 start serve with ${escape("--runner <name>")} naming this machine's worker, and it appears here</p>`;
+      `<p class="meta">what is changing right now</p>` +
+      `<div id="run-peek"><p class="meta">watching\u2026 the first look lands within 15 seconds</p></div>` +
+      `<p class="meta" id="run-peek-stamp"></p>`;
     const transcript =
-      data.peekable !== true
-        ? ""
-        : liveRun.provider !== "claude"
+      liveRun.provider !== "claude"
           ? `<p class="meta">the live transcript needs the claude harness for now \u2014 this build runs on ${escape(liveRun.provider)}</p>`
           : `<p class="meta">what the agent is saying · display only \u2014 this is not evidence, and the machine running the agent could alter it</p>` +
             `<pre id="live-transcript" class="mono" style="max-height:18rem;overflow:auto;white-space:pre-wrap"></pre>` +
@@ -22175,7 +22316,18 @@ function taskBodyParts(data: {
   thread.push({ key: "filed", at: rootFiled, kind: "filed", who: "person", author: filedBy ?? "", title: "Filed the task",
     text: (() => { const goal = data.family?.root.goal ?? scope?.goal ?? null; return goal === null ? null : oneLineOf(goal, 280); })(), link: null, html: "", more: null });
   const newestBuilt = familyRuns.filter(run => run.outcome === "built" && run.role !== "planner" && run.role !== "reviewer").sort((a, b) => b.id - a.id)[0];
+  // Failed: the card says what went wrong in one line, and its one act is Retry itself (the same requeue), never a link to
+  // this page; someone who can't retry here (a viewer, a live claim) gets no act at all.
+  const statusCard = data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null;
+  // A live build says which step it is on, or which step it is stuck on and why.
+  const building = statusCard?.status.headline === "Building" && liveRun !== undefined && liveRun.role !== "planner" && liveRun.role !== "reviewer";
+  // While a build runs, the attempts that stopped before it fold into one quiet line under its Building card. Only
+  // there: with any other card (or none) they stay in the thread, never vanish.
+  const earlierStopped = !building ? []
+    : familyRuns.filter(run => run.id < liveRun.id && (run.role === "builder" || run.role === "scout") && run.outcome !== "built" && run.outcome !== "no-change" && run.id !== liveHistoryRunId);
+  const foldedAttempts = new Set(earlierStopped.map(run => run.id));
   for (const run of familyRuns) {
+    if (foldedAttempts.has(run.id)) continue;
     const live = run.id === liveHistoryRunId || (run.outcome === null && run.id === liveRunId);
     const noun = runNoun(run);
     const href = { label: `${noun[0]!.toUpperCase()}${noun.slice(1)} #${run.id}`, href: `/r/${run.id}` };
@@ -22282,9 +22434,6 @@ function taskBodyParts(data: {
   // needs a person, then facts, then folds; the mechanics under Manage.
   const MANAGE = new Set(["steering", "waits-for", "holds"]);
   const finished = task.state === "done" || task.state === "cancelled";
-  // Failed: the card says what went wrong in one line, and its one act is Retry itself (the same requeue), never a link to
-  // this page; someone who can't retry here (a viewer, a live claim) gets no act at all.
-  const statusCard = data.assignment != null && assignmentOptions !== null ? assignmentCardOf(data.assignment, assignmentOptions) : null;
   const failedCard = statusCard?.status.headline === "Failed";
   // A link to this very page, with no section to open, goes nowhere: a card never offers one.
   const bareSelfLink = (href: string): boolean => {
@@ -22296,7 +22445,34 @@ function taskBodyParts(data: {
   // Build again, in place, names its form after the card's own act.
   const rebuild = data.csrf !== "" && data.assignment?.primaryAction?.code === "retry-task" && data.assignment.need != null && "key" in data.assignment.need && data.assignment.need.key === "rebuild"
     ? { action: `${taskHref(data.assignment.rootId)}/requeue` } : null;
-  const retry = failedCard && task.state === "failed" && !data.claimed && !stopControlsActive && data.csrf !== "" ? { action: `${taskHref(task.id)}/requeue` } : null;
+  const retry = failedCard && task.state === "failed" && !data.claimed && !stopControlsActive && data.csrf !== ""
+    ? { action: `${taskHref(task.id)}/requeue`, ...(data.failure == null ? {} : { note: retryNoteOf(data.failure.suggestion) }) } : null;
+  // Run checks happens in place: a status row's Run checks posts here and comes back; with nothing to run, the row offers nothing.
+  const runChecks = data.runChecks ?? null;
+  // A row's link to a result in Chat opens that result's own page instead: Chat would only lead back here.
+  const resultPageOf = (href: string | null): string | null => {
+    const chat = href === null ? null : /^\/chat\?task=([A-Za-z0-9._~%-]{1,200})&result=([0-9]{1,15})(?:&tab=(changes|checks))?(#[A-Za-z0-9_-]{1,80})?$/.exec(href);
+    return chat === null ? href : `/review?result=${chat[1]}&run=${chat[2]}${chat[3] === undefined ? "" : `&tab=${chat[3]}`}${chat[4] ?? ""}`;
+  };
+  const inPlaceChecks = (card: AssignmentCard): AssignmentCard => {
+    const status = data.demo === true ? demoChecksOf(card.status) : card.status;
+    return { ...card, status: { ...status, details: status.details.map(one =>
+      one.action?.href?.endsWith("#follow-ups") === true ? { ...one, action: runChecks === null ? null : { label: one.action.label, href: runChecks.action } }
+        : { ...one, href: resultPageOf(one.href), action: one.action === null ? null : { ...one.action, href: resultPageOf(one.action.href) } }) } };
+  };
+  const steps = building ? buildProgressOf(data.milestoneProgress ?? null) : null;
+  const progress = steps === null ? null : { line: steps.line,
+    stuck: steps.stuck === null ? null : { ...steps.stuck, action: data.csrf === "" ? null : { label: "Send the agent a note", href: "#steering" } } };
+  // The Building card carries Stop for the build it describes (the same form), in place of a second card below it.
+  const stop = building && data.control?.kind === "stop" && data.control.run === liveRun!.id && data.csrf !== ""
+    ? { action: `${taskHref(task.id)}/stop`, run: data.control.run } : null;
+  // The Building card keeps its way to the build's own record (/r/<id>), whatever act it shows.
+  const record = building ? { label: `Build #${liveRun!.id} record`, href: `/r/${liveRun!.id}` } : null;
+  const earlier = earlierStopped.length === 0 ? null : {
+    summary: earlierAttemptsWords(earlierStopped.length),
+    attempts: [...earlierStopped].sort((a, b) => a.id - b.id).map(run => ({ label: `${runNoun(run)[0]!.toUpperCase()}${runNoun(run).slice(1)} #${run.id}`, href: `/r/${run.id}`,
+      text: run.outcome === null ? "Never finished." : run.outcome === "failed" ? failedAttemptSentence(run.reason) : run.reason === null ? null : (words => `${words.charAt(0).toUpperCase()}${words.slice(1)}.`)(reasonWords(run.reason)) })),
+  };
   const view: BrowserTaskView = {
     kind: "task",
     id: task.id,
@@ -22308,18 +22484,24 @@ function taskBodyParts(data: {
       { label: "Ask", href: taskChatHref(data.rootId ?? task.id), active: false },
     ],
     version: data.versionLabel == null ? null : { label: data.versionLabel, current: { label: "Current work", href: taskHref(data.rootId ?? task.id) } },
-    status: statusCard === null ? null : failedCard ? { ...statusCard, action: null, status: { ...statusCard.status, sentence: data.failure?.line ?? statusCard.status.sentence } }
-      : statusCard.action !== null && rebuild === null && bareSelfLink(statusCard.action.href) ? { ...statusCard, action: null } : statusCard,
+    status: statusCard === null ? null : inPlaceChecks(failedCard ? { ...statusCard, action: null, status: { ...statusCard.status, sentence: data.failure?.line ?? statusCard.status.sentence } }
+      : progress !== null || record !== null ? { ...statusCard, action: statusCard.action?.href === record?.href ? null : statusCard.action, status: { ...statusCard.status, sentence: progress?.line ?? statusCard.status.sentence } }
+      : statusCard.action !== null && rebuild === null && bareSelfLink(statusCard.action.href) ? { ...statusCard, action: null } : statusCard),
     statusHtml,
-    failure: failedCard ? data.failure ?? null : null,
+    failure: failedCard && data.failure != null ? { line: data.failure.line, evidence: data.failure.evidence, suggestion: data.failure.suggestion, link: data.failure.link } : null,
     retry,
+    runChecks,
+    progress,
+    stop,
+    record,
+    earlier,
     approval: approvalHtml,
     confirmStopped: data.csrf !== "" && data.assignment?.primaryAction?.code === "confirm-stopped" && data.assignment.primaryAction.target.runId !== null
       ? { action: `${taskHref(data.assignment.rootId)}/confirm-stopped`, run: data.assignment.primaryAction.target.runId, checked: needsCheck(data.assignment) } : null,
     rebuild,
     // The plan, progress and plan changes are thread entries now; the rest still needs a person here.
     lead: [
-      { key: "history", html: data.history ?? "" }, { key: "control", html: controlHtml }, { key: "problem", html: problemHtml },
+      { key: "history", html: data.history ?? "" }, { key: "control", html: stop === null ? controlHtml : taskControlDetailsHtml(data.control!, task.id, data.csrf, "task", false, true) }, { key: "problem", html: problemHtml },
       { key: "pull-request", html: pullRequestCard },
       { key: "needs-scope", html: needsScopeCard },
       { key: "mirror", html: mirrorCard }, { key: "contest", html: contestCard }, { key: "attempt", html: attemptPanel },
@@ -22643,6 +22825,10 @@ type ReviewCockpitView = {
   /** The same history as the shared projection's facts (review fixes). */
   review: ReviewFacts | null;
   notes: { id: number; author: string; note: string; createdAt: string }[];
+  /** The demo database: no check runs here, and the Checks row says so. */
+  demo?: boolean;
+  /** A build that didn't deliver a result: what it missed, the suggestion, and Retry when the task can be retried here. */
+  failure?: (FailureExplanation & { retry: { action: string; note: string } | null; acceptAnyway?: { action: string; run: number } | null }) | null;
 };
 
 /** The one result page's address: the task and its run, never a project path
@@ -23000,7 +23186,12 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
     ? { action: `/r/${run.id}/checks`, level: followUps.full ? "full" as const : "quick" as const, returnTo: `${here}&run=${run.id}&tab=checks` } : null;
   const need = panel.panel.need;
   const nextKind = selected.next?.kind;
-  const acts = resultActsOf({
+  // A failed build: what went wrong is the card, Retry the act; a link to this same page goes nowhere, so it isn't one.
+  const failure = view.failure == null ? null : { line: view.failure.line, evidence: view.failure.evidence, suggestion: view.failure.suggestion, retry: view.failure.retry,
+    link: view.failure.link === null || (view.failure.link.href.startsWith(`${here}&run=${run.id}`) && !view.failure.link.href.includes("#")) ? null : view.failure.link,
+    ...(view.failure.acceptAnyway == null ? {} : { acceptAnyway: { ...view.failure.acceptAnyway, returnTo: `${here}&run=${run.id}` } }) };
+  const acts = failure !== null ? resultActsOf({ accept: null, runChecks: runChecks !== null, checksRunning, blocked: null, canRequest: false, need: null, next: null, failed: { retry: failure.retry !== null, acceptAnyway: failure.acceptAnyway !== undefined } })
+    : resultActsOf({
     accept: decision === null ? null : { ready: decision.ready },
     runChecks: runChecks !== null,
     checksRunning,
@@ -23012,7 +23203,7 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
 
   // A refuted result's card lists every recorded disagreement, each tied to its lines; when the report itself doesn't
   // match the changes (not a failed check), that is the headline.
-  const mismatch = proof === null || accepted || proof.verdict !== "refuted" ? null : (() => {
+  const mismatch = failure !== null || proof === null || accepted || proof.verdict !== "refuted" ? null : (() => {
     const patch = view.detail?.terminal?.patch ?? null;
     const files = patch === null || "problem" in patch ? [] : parseReviewDiff(patch.text).files;
     // Each file's first change: the lines it added (else every line it shows), and where that change starts (its link target).
@@ -23053,7 +23244,24 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   return {
     html: `<section class="cockpit-detail">${parts.join("\n")}</section>`,
     selected: {
-      ...selected, complete, decision, panel: panel.panel, contest, acts, runChecks, mismatch,
+      ...selected, complete: failure === null ? complete : null, decision: failure === null ? decision : null, contest, acts, runChecks, mismatch, failure,
+      // A failed build reads Failed, whatever its task has done since; its outcome is what went wrong.
+      // Run checks is the decision's own act on this page; a status row never sends the person to Chat for it.
+      panel: (() => {
+        // A Chat link to this same result would lead back here: it isn't one.
+        const elsewhere = (href: string | null): boolean => href !== null && !href.endsWith("#follow-ups") && !new RegExp(`^/chat\\?task=[^&]+&result=${run.id}(?:&|$)`).test(href);
+        const shown = panel.panel.status === null ? null : view.demo === true ? demoChecksOf(panel.panel.status) : panel.panel.status;
+        const missed = proof === null || proof.proofProblem !== null ? 0 : requirementsOf(proof.matrix)?.missed ?? 0;
+        const status = shown === null ? null : { ...shown, details: shown.details.map(one => ({ ...one,
+          href: elsewhere(one.href) ? one.href : null, action: one.action !== null && elsewhere(one.action.href) ? one.action : null })) };
+        return failure === null ? { ...panel.panel, status }
+          : { ...panel.panel, outcome: failure.line, need: null, youCheck: null, status: status === null ? null : { ...status, headline: "Failed" as const, tone: "danger" as const, sentence: failure.line, need: null,
+              // Read as Failed, the Requirements row counts what it missed, as the task's card does.
+              details: status.details.map(one => one.key !== "requirements" || missed === 0 ? one : { ...one, text: `${missed} missed`, mark: "failed" as const, action: null }) },
+            // What it missed is said once, in plain words above; the recorded wording stays under Details.
+            attention: panel.panel.attention.filter(one => !(proof?.reasons ?? []).includes(one) && !(proof?.matrix ?? []).some(row => row.detail.includes(one))) };
+      })(),
+      ...(failure === null ? {} : { status: { label: "Failed", tone: "problem" as const, token: "failed" } }),
       checks: checks === undefined ? null : { detail: checks.detail, problem: checks.status === "failed" || checks.status === "unavailable", logHref: checks.logArtifactId === null ? null : `/r/${run.id}/evidence/${checks.logArtifactId}` },
     },
   };

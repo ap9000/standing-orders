@@ -158,10 +158,21 @@ export type BrowserTaskView = {
   confirmStopped?: { action: string; run: number; checked?: boolean } | null;
   /** Build again, in place, when the status asks for it (a result built to an earlier plan). */
   rebuild?: { action: string } | null;
-  /** A failed task's recorded reason in one line (the run's reason, the failing check's last error line, or that none was
-   * recorded) and where its log lines are; and Retry itself, with an optional note. */
-  failure?: { line: string; link: { label: string; href: string } | null } | null;
-  retry?: { action: string } | null;
+  /** What a failed task missed, in one line (the requirement it missed, the failing check's error line, or the stop
+   * reason), the evidence line behind it, one suggestion of what to change, and where to see it (its build's result
+   * page, or that exact check-log line); and Retry itself, its note starting with the suggestion. */
+  failure?: BrowserFailure | null;
+  retry?: { action: string; note?: string } | null;
+  /** Run checks in place, on a status row that offers it: posts and comes back to this page. */
+  runChecks?: BrowserRunChecks | null;
+  /** A live build: the step it is on (or stuck on, with the act that helps), and the earlier attempts that stopped
+   * before it, folded into one quiet line. */
+  progress?: { line: string; stuck: { step: number; why: string | null; line: string; action: BrowserLink | null } | null } | null;
+  /** Stop, on the Building card: the exact live build's stop form (posts its run id). */
+  stop?: { action: string; run: number } | null;
+  /** The Building card's link to the live build's own record ("Build #N record", /r/<id>). */
+  record?: BrowserLink | null;
+  earlier?: { summary: string; attempts: { label: string; href: string; text: string | null }[] } | null;
   /** Server cards that may need a person now (stop/resume, scope prompt, plan, live attempt). */
   lead: { key: string; html: string }[];
   questions: string;
@@ -277,7 +288,12 @@ export type BrowserResultView = {
     /** The one ink act that resolves the result, the one outline act beside it, and why it can't be accepted yet (result-acts.ts). */
     acts: ResultActs;
     /** Run checks on this result's commit: the project's check, when it didn't run. */
-    runChecks: { action: string; level: "quick" | "full"; returnTo: string } | null;
+    runChecks: BrowserRunChecks | null;
+    /** A failed build's result: what it missed and the suggestion Retry's note starts with; Retry itself when the task
+     * can be retried from here. Null for every other result. */
+    failure?: (BrowserFailure & { retry: { action: string; note: string } | null;
+      /** A failed task's delivered result, accepted only in outline with a reason (the task's accept-proof). */
+      acceptAnyway?: { action: string; run: number; returnTo: string } | null }) | null;
     /** The raw run record, under Details: its facts and the full record. */
     record: { build: number; href: string; facts: { label: string; value: string }[] } | null;
     /** The signed scope; null when none was filed. */
@@ -288,6 +304,8 @@ export type BrowserResultView = {
     notes: { author: string; at: string; note: string }[];
   } | null;
 };
+export type BrowserFailure = { line: string; evidence: string | null; suggestion: string; link: { label: string; href: string } | null };
+export type BrowserRunChecks = { action: string; level: "quick" | "full"; returnTo: string };
 /** One zone on a flow's canvas: its step, where it leads, and where it sits. */
 export type BrowserFlowStage = {
   id: string; title: string; kind: "inbox" | "task" | "report" | "approval" | "check" | "pull-request" | "update" | "notify" | "sort" | "draft" | "request" | "email" | "tool" | "wait" | "teammate" | "done";

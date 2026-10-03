@@ -139,9 +139,10 @@ describe("the exact-run control on the console (v52)", () => {
     expect(stopping).toContain('<span class="mono">alex</span>');
     expect(stopping).not.toMatch(/\bStopped\b/);
     expect(controlOf(await page(cookie, "/chat/task-status?task=payouts"))).toContain('data-task-control="stopping"');
-    // Repeated: the same request, nothing new.
-    const again = await post(cookie, "/t/payouts/stop", { csrf, run: String(runId) });
+    // Repeated (as the Building card's own Stop posts it, return=task): the same request, nothing new, back on the task page.
+    const again = await post(cookie, "/t/payouts/stop", { csrf, run: String(runId), return: "task" });
     expect(again.status).toBe(303);
+    expect(again.headers.get("location")).toBe("/t/payouts#task-control");
     expect(store.stopsForTask(ref)).toHaveLength(1);
     // Resume is refused while stopping — even armed directly.
     const early = await post(cookie, "/t/payouts/resume-arm", { csrf, run: String(runId) });

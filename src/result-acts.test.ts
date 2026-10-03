@@ -7,6 +7,19 @@ const base: ResultActFacts = { accept: null, runChecks: false, checksRunning: fa
 const MISMATCH = ACCEPT_NEEDS_REASON;
 
 describe("the result page's one ink act", () => {
+  it("a failed build: Retry, then Run checks when they didn't run; never Accept or Request changes", () => {
+    const failed = { ...base, accept: { ready: true }, failed: { retry: true } };
+    expect(resultActsOf(failed)).toEqual({ primary: "retry", secondary: null, line: null });
+    expect(resultActsOf({ ...failed, runChecks: true })).toEqual({ primary: "retry", secondary: "run-checks", line: null });
+    expect(resultActsOf({ ...failed, checksRunning: true })).toEqual({ primary: "retry", secondary: "checks-running", line: null });
+    // Nothing to retry from here (already retried, or a viewer): Run checks alone, or nothing.
+    expect(resultActsOf({ ...failed, failed: { retry: false }, runChecks: true })).toEqual({ primary: "run-checks", secondary: null, line: null });
+    expect(resultActsOf({ ...failed, failed: { retry: false } })).toEqual({ primary: null, secondary: null, line: null });
+    // A failed task's delivered result: Accept anyway, only ever in outline, takes the outline place from Run checks.
+    expect(resultActsOf({ ...failed, failed: { retry: true, acceptAnyway: true }, runChecks: true })).toEqual({ primary: "retry", secondary: "accept-anyway", line: null });
+    expect(resultActsOf({ ...failed, failed: { retry: false, acceptAnyway: true } })).toEqual({ primary: null, secondary: "accept-anyway", line: null });
+  });
+
   it("everything met: Accept, with Request changes beside it", () => {
     expect(resultActsOf({ ...base, accept: { ready: true } })).toEqual({ primary: "accept", secondary: "request-changes", line: null });
   });

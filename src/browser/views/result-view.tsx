@@ -16,6 +16,7 @@ import {
 import { ACCEPT_NEEDS_REASON, type ResultActKind } from "../../result-acts.js";
 import { toneOf } from "./tone.js";
 import { ConfirmStoppedForm, HEADLINE_DOT, RebuildForm, StatusDetails, StatusHeadline, statusWhyLines } from "./status-summary.js";
+import { RetryForm } from "./task-view.js";
 
 type Selected = NonNullable<BrowserResultView["selected"]>;
 
@@ -99,7 +100,13 @@ function StatusCard({ selected }: { selected: Selected }) {
         : <h2 className="flex items-center gap-2.5 text-lg font-semibold leading-snug">
             <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", DOT[tone])} />{selected.status.label}
           </h2>}
-      {sentence !== "" && <p className="mt-1.5 max-w-[75ch] text-sm text-muted-foreground" data-result-sentence>{sentence}</p>}
+      {sentence !== "" && <p className={cn("mt-1.5 max-w-[75ch] text-sm", selected.failure != null ? "text-foreground" : "text-muted-foreground")} data-result-sentence
+        {...(selected.failure != null ? { "data-failure-reason": "" } : {})}>{sentence}</p>}
+      {/* A failed build: the evidence behind what it missed, and that exact log line when a check failed. */}
+      {selected.failure != null && (selected.failure.evidence !== null || selected.failure.link !== null) && <p className="mt-1 max-w-[75ch] text-[13px] text-muted-foreground" data-failure-evidence>
+        {selected.failure.evidence !== null && <span className="[overflow-wrap:anywhere]">{selected.failure.evidence}</span>}
+        {selected.failure.link !== null && <>{selected.failure.evidence !== null && " "}<a href={selected.failure.link.href} data-failure-log className={META_LINK}>{selected.failure.link.label}</a></>}
+      </p>}
     </div>
     {mismatch !== null && mismatch.rows.length > 0 && <ul aria-label="What doesn't match" className="flex flex-col gap-1.5 border-t border-border pt-3 text-[13px] phone:pt-2" data-mismatches={mismatch.rows.length}>
       {mismatch.rows.map((one, index) => <li key={index} data-mismatch className="flex gap-2">
@@ -212,13 +219,15 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
   const shown = [acts.primary, acts.secondary].filter((one): one is ResultActKind => one !== null);
   const why = shown.includes("accept") ? decision?.why ?? null : null;
   // "Accepting needs a reason" labels the reason field when that field is here; it isn't said twice.
-  const reasonHere = shown.includes("accept") && complete === null && accept?.note != null;
+  const reasonHere = shown.includes("accept") && complete === null && accept?.note != null || shown.includes("accept-anyway");
   const line = acts.line === ACCEPT_NEEDS_REASON && reasonHere ? null : acts.line ?? why;
   const act = (kind: ResultActKind, ink: boolean): ReactNode => {
     const variant = ink ? "attention" as const : "outline" as const;
     const mark = { "data-act": kind, ...(ink ? { "data-ink-act": kind, "data-primary-action": "" } : {}) };
     const wide = "min-h-11 phone:w-full";
     switch (kind) {
+      case "retry":
+        return selected.failure?.retry == null ? null : <RetryForm key={kind} action={selected.failure.retry.action} csrf={csrf} note={selected.failure.retry.note} variant={variant === "attention" ? "attention" : "default"} />;
       case "accept":
         if (decision === null) return null;
         if (complete !== null) return <form key={kind} method="post" action={complete.action} className="phone:w-full">
@@ -243,6 +252,19 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
           <input type="hidden" name="return" value={accept.returnTo} />
           <Button type="submit" variant={variant} className={wide} {...mark} data-accept-result><Check className="phone:hidden" />{decision.label}</Button>
         </form>;
+      case "accept-anyway": {
+        // A failed task's result: accepted only on purpose, so the reason field is required and sits right above it.
+        const anyway = selected.failure?.acceptAnyway ?? null;
+        if (anyway == null) return null;
+        return <form key={kind} method="post" action={anyway.action} className="flex w-full max-w-sm flex-col items-start gap-2 phone:max-w-none" data-accept-with-reason data-accept-anyway>
+          <input type="hidden" name="csrf" value={csrf} />
+          <input type="hidden" name="run" value={String(anyway.run)} />
+          <input type="hidden" name="return" value={anyway.returnTo} />
+          <label htmlFor="accept-reason" className="text-[13px] font-medium" data-accept-needs-reason>{ACCEPT_NEEDS_REASON}</label>
+          <Input id="accept-reason" type="text" name="note" maxLength={500} required placeholder="Why is this safe to accept?" className="h-11 w-full" />
+          <Button type="submit" variant="outline" className={wide} {...mark} data-accept-result><Check className="phone:hidden" />Accept anyway</Button>
+        </form>;
+      }
       case "checks-running":
         return <Button key={kind} type="button" variant={variant} disabled aria-disabled="true" className={wide} {...mark}>Checks running</Button>;
       case "run-checks":
@@ -264,11 +286,13 @@ function Decision({ selected, csrf }: { selected: Selected; csrf: string }) {
         return next === null ? null : <Html key={kind} html={next.control} className="so-result-next phone:w-full" />;
     }
   };
-  if (shown.length === 0 && next === null) return null;
+  if (shown.length === 0 && next === null && selected.failure == null) return null;
   return <Card data-result-decision={acts.primary ?? "none"} aria-label="Decision"
     className={cn("gap-2 phone:gap-2", shown.length > 0 && "phone:sticky phone:bottom-[-20px] phone:z-10 phone:-mx-4 phone:rounded-none phone:border-x-0 phone:px-4 phone:pb-[max(14px,env(safe-area-inset-bottom))] phone:shadow-[0_-4px_16px_rgb(0_0_0/.08)]")}>
     {line !== null && <p className="flex max-w-[75ch] gap-2 text-[13px]" data-decision-why {...(acts.line === null ? {} : { "data-cant-accept": "" })}>
       <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />{line}</p>}
+    {selected.failure != null && selected.failure.retry === null && <p className="max-w-[75ch] text-[13px]" data-failure-suggestion>
+      <span className="font-semibold">What to change.</span> <span className="text-muted-foreground">{selected.failure.suggestion}</span></p>}
     {/* What comes next (notes ready, CI failing, a contest to compare, no build): one line, whatever the acts. */}
     {next !== null && <p className="max-w-[75ch] text-[13px]" data-next-action={next.kind}>
       <span className="font-semibold">{next.title}.</span> <span className="text-muted-foreground">{next.detail}</span></p>}

@@ -67,8 +67,9 @@ export type TaskStatusFacts = {
   report?: boolean;
   checks?: ChecksFact | null;
   pullRequest?: PullRequestFact | null;
-  /** `unverified`: the report is refuted, so no requirement counts as met however it was marked. */
-  requirements?: { met: number; total: number; yours: number; unverified?: boolean } | null;
+  /** `unverified`: the report is refuted, so no requirement counts as met however it was marked. `missed`: the ones it
+   * failed or left unanswered. */
+  requirements?: { met: number; total: number; yours: number; missed?: number; unverified?: boolean } | null;
   evidence?: { shortened: number; missing: number; damaged: number } | null;
   completedBy?: string | null;
   action?: StatusAction | null;
@@ -152,7 +153,8 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
     else if (checks.status === "running") row("checks", "Checks", "Running", "running");
     else if (checks.level === "off") row("checks", "Checks", "Off for this project", "none", runChecks === null ? {} : { action: runChecks });
     else if (checks.status === "not-run") row("checks", "Checks", "Didn't run", "none", runChecks === null ? {} : { action: runChecks });
-    else row("checks", "Checks", "Couldn't be read", "note", { action: { label: "Open the result", href: facts.links?.result ?? null } });
+    // A saved check that can't be read is run again where that is possible.
+    else row("checks", "Checks", "Couldn't be read", "note", { action: runChecks ?? { label: "Open the result", href: facts.links?.result ?? null } });
   }
   const pr = facts.pullRequest;
   if (pr != null) {
@@ -170,7 +172,9 @@ function detailsOf(headline: Headline, facts: TaskStatusFacts): StatusDetail[] {
     else row("pull-request", "Pull request", `${name} open`, "none", { href: github });
   }
   const req = facts.requirements;
-  if (req != null && req.total > 0 && req.unverified === true) row("requirements", "Requirements", "Unverified", "none");
+  // A failed result names how many it missed, refuted or not: that is what failed.
+  if (req != null && req.total > 0 && headline === "Failed" && (req.missed ?? 0) > 0) row("requirements", "Requirements", `${req.missed} missed`, "failed");
+  else if (req != null && req.total > 0 && req.unverified === true) row("requirements", "Requirements", "Unverified", "none");
   else if (req != null && req.total > 0) {
     const unmet = req.total - req.met - req.yours;
     const text = `${req.met} of ${req.total} met${req.yours > 0 ? ` · You check ${req.yours}` : ""}`;
@@ -309,7 +313,8 @@ export function requirementsOf(matrix: readonly { state: string; assessment?: { 
   if (!matrix || matrix.length === 0) return null;
   // Evidence that passed and only awaits the retired assessment step is met.
   const met = (row: (typeof matrix)[number]) => row.state === "pass" || (row.assessment?.evidenceState === "pass" && (row.review ?? null) === null);
-  return { met: matrix.filter(met).length, total: matrix.length, yours: matrix.filter(row => !met(row) && row.state === "manual-review").length };
+  return { met: matrix.filter(met).length, total: matrix.length, yours: matrix.filter(row => !met(row) && row.state === "manual-review").length,
+    missed: matrix.filter(row => !met(row) && (row.state === "failed" || row.state === "missing")).length };
 }
 
 /** A refuted report verifies none of its requirements, whatever it marked met (a person's acceptance doesn't change that). */
@@ -431,4 +436,11 @@ export function stageOfDispatch(d: { code: string; condition: string; action: st
   if (d.code === "proof-refuted") return /approved check failed|checks failed/i.test(d.detail ?? "") ? { stage: "failed" } : { stage: "needs-you", need: "review-result" };
   if (d.code === "needs-verification") return { stage: "needs-you", need: "review-result" };
   return stageOfCode(d.code, { needsPerson: d.condition === "waiting" && d.action !== null, planning: d.condition === "running" && d.role === "planner", operatorHold: d.action === "unhold" });
+}
+
+/** The demo runs no checks: a Checks row that would offer to run one (or open one that never ran) says so instead. */
+export const DEMO_CHECKS = "Can't run in the demo";
+export function demoChecksOf(status: TaskStatus): TaskStatus {
+  return { ...status, details: status.details.map(one => one.key !== "checks" || one.mark === "ok" || one.mark === "failed" || one.mark === "running" ? one
+    : { ...one, text: DEMO_CHECKS, mark: "none", href: null, action: null, why: null }) };
 }
