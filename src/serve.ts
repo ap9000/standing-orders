@@ -65,7 +65,7 @@ import { prepareWorkspaceRevision, WorkspaceValidatorCache } from "./workspace-r
 import { workIndexPage, workCountsByProject, WorkIndexCursorError, WORK_INDEX_MAX_LIMIT, type WorkIndexPage, type WorkIndexItem, type WorkIndexGroup } from "./work-index.js";
 import { leadActivity } from "./lead-voice.js";
 import { openWorkDecisionOf } from "./work-summary.js";
-import { acceptAndCompleteAsOperator, assignmentOf, checkAssignmentAsOperator, personCheckPending, type AssignmentSnapshot } from './assignment.js';
+import { acceptAndCompleteAsOperator, assignmentOf, checkAssignmentAsOperator, owedAcceptance, type AssignmentSnapshot } from './assignment.js';
 import type { DemoExchange, DemoLead } from "./demo.js";
 import { demoChatHtml, demoThreadHtml, DEMO_CHAT_SCRIPT, type DemoResultView } from "./demo-chat.js";
 import type { PublishExec } from './publish.js';
@@ -2664,6 +2664,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           csrf,
           canRetryReview: who.via === "cookie" && who.role === "approver",
           noted: url.searchParams.get("noted") !== null,
+          refusal: Object.hasOwn(RESULT_REFUSALS, url.searchParams.get("refused") ?? "") ? RESULT_REFUSALS[url.searchParams.get("refused")!]! : null,
           tab: parseResultTab(url.searchParams.get("tab")),
           user: who.name,
           now,
@@ -3169,7 +3170,8 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
       if (family === null) return refuse(response, who, 404, "no such task", "/tasks");
       const version = url.searchParams.get("version");
       if (version !== null && !family.versions.some(one => one.id === version)) return refuse(response, who, 404, "That version is not available for this task.", taskHref(family.root.id));
-      if (task.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}?version=${encodeURIComponent(task.taskId)}`);
+      // A version's own address lands on its family's page, still asking for the plan editor when it did (Chat's Edit plan).
+      if (task.taskId !== family.root.id) return redirect(response, `${taskHref(family.root.id)}?version=${encodeURIComponent(task.taskId)}${url.searchParams.get("edit") === "plan" ? "&edit=plan" : ""}`);
       return taskScreen(response, who, version ?? family.current.id, null, 200, undefined, undefined, url.searchParams.get("edit") === "plan");
     }
 
@@ -10864,7 +10866,13 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           if (!(error instanceof PermissionsWouldChange)) throw error;
           saved = { ok: false, status: 409, message: "Not saved: this would change what the agent may do. Change permissions in Details, under edit the scope." };
         }
-        if (!saved.ok) return taskScreen(response, who, taskId, saved.message, saved.status, body);
+        if (!saved.ok) {
+          // Refused because the plan moved on: the draft comes back with the version now on file, so saving it
+          // again (having read the reason) can succeed instead of being refused the same way.
+          const draft = new URLSearchParams(body);
+          if (saved.status === 409) draft.set("sawDigest", store.getScope(taskId)?.digest ?? "");
+          return taskScreen(response, who, taskId, saved.message, saved.status, draft);
+        }
         return redirect(response, taskHref(taskId));
       }
       case "approve": {
@@ -10976,7 +10984,12 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           note = validated.note;
         }
         // A failed task's result is accepted only anyway, on purpose: with a reason.
-        if (note === null && store.getTask(taskId)?.state === "failed") return taskScreen(response, who, taskId, "Accepting anyway needs a reason.", 400);
+        if (note === null && store.getTask(taskId)?.state === "failed") {
+          // Posted from the result page: back there, where the reason field is, with the refusal said on it.
+          const back = body.get("return") === null ? null : safeReturn(body.get("return"));
+          if (back !== null && back.startsWith("/review?")) return redirect(response, withRefusal(back, "reason"));
+          return taskScreen(response, who, taskId, ACCEPT_ANYWAY_NEEDS_REASON, 400);
+        }
         store.acceptProof(latest.id, verifiedAuthor(who.name), note, now);
         return redirect(response, body.get("return") === null ? taskHref(taskId) : safeReturn(body.get("return")));
       }
@@ -11003,7 +11016,7 @@ export function createDecisionServer(options: ServeOptions): DecisionServer {
           const publish = body.get("publish") === "1";
           const finished = acceptAndCompleteAsOperator(store, taskId, { runId: Number(namedRun), receiptDigest: digest, note }, principal, now, evidenceRoot,
             publish ? accepted => completeAndOpenPullRequest(store, { taskId, digest: accepted, runId: Number(namedRun), who: principal, root: evidenceRoot }, now) : undefined);
-          if (!finished.ok) return taskScreen(response, who, taskId, finished.message, 409);
+          if (!finished.ok) return taskScreen(response, who, taskId, finished.message, finished.reason === "needs-reason" ? 400 : 409);
           return redirect(response, publish ? `${taskHref(familyOf(taskId)?.root.id ?? taskId)}#merge` : body.get("return") === null ? reviewHref(taskId, Number(namedRun)) : safeReturn(body.get("return")));
         }
         if (body.get("publish") === "1") {
@@ -20442,6 +20455,17 @@ function accentHead(): string {
 const requestContext = new AsyncLocalStorage<{ sso?: { label: string; fresh: boolean } | undefined; refusal?: (response: ServerResponse, status: number, body: string) => void; theme?: "light" | "dark" | null; accent?: string | null; updateSeen?: string | null; csrf: string; returnTo: string; actor?: string; createdTask?: string; browser?: boolean; workspaceRead?: boolean; workspaceRequest?: string | null; workCounts?: ReturnType<typeof workCountsByProject>; workCrew?: { project: string | null; page: WorkIndexPage }; workspaceValidator?: { key: string; revision: string; expiresAt: number; etag: string } }>();
 
 /** A same-site path or "/": never a scheme, a host, or a protocol-relative road. */
+/** The words a result page shows for a refusal its own form led to, by the fixed code a redirect carries. */
+const ACCEPT_ANYWAY_NEEDS_REASON = "Accepting anyway needs a reason.";
+const RESULT_REFUSALS: Record<string, string> = { reason: ACCEPT_ANYWAY_NEEDS_REASON };
+
+/** A same-site page address with a refusal code added, before any fragment. */
+function withRefusal(href: string, code: keyof typeof RESULT_REFUSALS): string {
+  const at = href.indexOf("#");
+  const [path, hash] = at === -1 ? [href, ""] : [href.slice(0, at), href.slice(at)];
+  return `${path}${path.includes("?") ? "&" : "?"}refused=${code}${hash}`;
+}
+
 function safeReturn(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return "/";
   // A backslash is a slash to a browser's URL parser (`/\evil` → `//evil`), so it is refused too (v3 review, finding 10).
@@ -23185,6 +23209,8 @@ function reviewCockpitPage(
     /** v50: an approver's session may ask for a review retry here. */
     canRetryReview: boolean;
     noted: boolean;
+    /** What this person's last post from this page was refused for, in words (`refused=` on the address). */
+    refusal?: string | null;
     /** Package 3: the selected local result view and the panel's draft keys. */
     tab: ResultTab;
     user: string;
@@ -23250,12 +23276,13 @@ function reviewCockpitPage(
     capped: queue.length >= data.queueCap ? data.queueCap : null,
     missing: data.missing === null ? null : `No completed task ${data.missing} is in view here — it may not be finished, or it is outside this console's projects.`,
     beyond: data.beyondQueue && selected !== null,
-    selected: detailParts === null ? null : detailParts.selected,
+    selected: detailParts === null ? null : data.refusal == null ? detailParts.selected : { ...detailParts.selected, problem: data.refusal },
   };
   return screen("review", [
     selected === null ? `<h1>Results</h1>` : "",
     missingNote,
     beyondNote,
+    data.refusal == null || selected === null ? "" : `<p class="problem" data-result-refusal>${escape(data.refusal)}</p>`,
     `<div class="cockpit">${queuePane}${detail}</div>`,
   ].join("\n"), {
     chrome,
@@ -23496,12 +23523,11 @@ function reviewCockpitDetailParts(view: ReviewCockpitView, csrf: string, noted: 
   };
 }
 
-/** What Accept and finish owes before it completes, as the form asks for it: the person's own check (no
- * reason), an exception a report that doesn't match its changes needs a reason for, or nothing. */
+/** What Accept and finish owes before it completes, as the form asks for it: the server's own rule
+ * (owedAcceptance), so the form asks for exactly what the completion requires. */
 function owedAcceptanceOf(receipt: AssignmentSnapshot["receipt"]): { note: string | null } | null {
-  if (receipt === null || receipt.proofAcceptance !== null) return null;
-  if (personCheckPending(receipt)) return { note: null };
-  return cantAcceptYetOf(receipt.proof?.verdict ?? null, receipt.proof?.reasons ?? [], false) === ACCEPT_NEEDS_REASON ? { note: "Why is this safe to accept?" } : null;
+  const owed = owedAcceptance(receipt);
+  return owed === null ? null : owed === "person-check" ? { note: null } : { note: "Why is this safe to accept?" };
 }
 
 function completionForm(taskId: string, runId: number, digest: string, csrf: string, pullRequestTo: string | null = null, accept: { note: string | null } | null = null): string {

@@ -66,17 +66,37 @@ export function fullWhen(iso: string, zone = "UTC"): string {
 }
 
 /** Every server-rendered stamp (`whenHtml`'s `<time data-when>`) inside `root`, reworded by the one formatter in the
- * viewer's zone: the same words on a desk and a phone, the exact minute in the title. The server's UTC words stay
- * only without script. Times React writes, relative ages ("3 min ago") and exact stamps (the ledger's seconds) carry
- * no `data-when` and are never touched. */
+ * viewer's zone: the same words on a desk and a phone, the exact minute in the title. An exact stamp
+ * (`exactWhenHtml`'s `data-when="exact"`, the ledger's seconds) keeps its seconds, in the viewer's zone, and its
+ * ISO title. The server's UTC words stay only without script. Times React writes and relative ages ("3 min ago")
+ * carry no `data-when` and are never touched. */
 export function localizeTimes(root: ParentNode, now: Date = new Date(), zone: string = viewerZone()): void {
   root.querySelectorAll<HTMLTimeElement>("time[data-when][datetime]").forEach(node => {
     const iso = node.getAttribute("datetime") ?? "";
     if (iso === "" || Number.isNaN(new Date(iso).getTime())) return;
+    if (node.getAttribute("data-when") === "exact") {
+      const words = exactWhen(iso, zone);
+      if (node.textContent !== words) node.textContent = words;
+      return;
+    }
     const words = shortWhen(iso, now, zone), full = fullWhen(iso, zone);
     if (node.title !== full) node.title = full;
     if (node.textContent !== words) node.textContent = words;
   });
+}
+
+/** The exact second in `zone` ("2026-09-30 16:39:12", with " UTC" when it is UTC): an audit record's stamp. */
+export function exactWhen(iso: string, zone = "UTC"): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  const seconds = String(at.getUTCSeconds()).padStart(2, "0");
+  const minute = fullWhen(iso, zone);
+  return zone === "UTC" ? minute.replace(/ UTC$/, `:${seconds} UTC`) : `${minute}:${seconds}`;
+}
+
+/** The `<time>` for an exact stamp: its seconds in UTC words on the server, the viewer's zone in a browser. */
+export function exactWhenHtml(iso: string): string {
+  return `<time data-when="exact" datetime="${escape(iso)}" title="${escape(iso)}">${escape(exactWhen(iso))}</time>`;
 }
 
 /** The `<time>` for a stamp: `full` is the words a desk shows ("2026-09-30 16:39 UTC"). Empty for no stamp. */

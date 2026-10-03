@@ -66,7 +66,9 @@ describe("the Tasks list", () => {
     for (const page of [html(view({ groups: null })), html(view({ groups: [{ key: "review", label: "Review", count: 1 }] }))]) {
       const loose = page.match(/<li data-task="answer"[^]*?<\/li>/)![0];
       expect(loose).not.toContain("sr-only\" data-headline");
-      expect(loose).toMatch(/<span data-ask="decide" data-headline="Needs you" class="(?![^"]*sr-only)[^"]*">[^]*?Needs you<\/span>/);
+      // In the same ink chip as a grouped waiting row, never the attention colour.
+      expect(loose).toMatch(/<span data-ask="decide" data-headline="Needs you" title="Needs you" class="(?![^"]*sr-only)[^"]*bg-primary[^"]*text-primary-foreground[^"]*">Needs you<\/span>/);
+      expect(loose).not.toContain("bg-attention");
     }
     // No coloured border announces a wait.
     expect(page).not.toMatch(/border-l-/);

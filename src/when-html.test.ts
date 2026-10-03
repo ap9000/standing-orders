@@ -36,7 +36,7 @@ describe("the one formatter in the viewer's zone", () => {
     expect(deadlineWords({ at: "2026-10-09T23:30:00Z", label: "Moves on at" }, now, zone)).toBe("Moves on Oct 9 16:30");
   });
 
-  test("only the server's stamps are reworded: React's times, relative ages and the ledger's exact seconds keep theirs", async () => {
+  test("only the server's stamps are reworded, the ledger's keeping its seconds; React's times and relative ages keep theirs", async () => {
     const window = new Window();
     try {
       const ledger = ledgerBody([{ id: 7, at: "2026-10-01T21:16:42.123Z", actor: "sam", repo: null, taskId: null, runId: null, action: "Approved", outcome: "ok", source: "work", detail: null }], [], new URLSearchParams());
@@ -45,12 +45,14 @@ describe("the one formatter in the viewer's zone", () => {
         // The home lead's age and a thread time, as React writes them.
         `<p id="lead"><time datetime="2026-10-02T18:57:00.000Z">3 min ago</time></p><p id="thread"><time datetime="2026-10-02T16:39:00.000Z" title="2026-10-02 09:39">09:39</time></p>` +
         `<p id="chat"><time datetime="2026-10-02T18:57:00.000Z">3m ago</time></p>`;
+      // Without script, the ledger's own UTC words, said as UTC.
+      expect(window.document.querySelector(".ledger-time time")!.textContent).toBe("2026-10-01 21:16:42 UTC");
       localizeTimes(window.document as unknown as ParentNode, now, zone);
       const server = window.document.querySelector("time[data-when]")!;
       expect(server.textContent).toBe("Yesterday 14:16");
       expect(server.getAttribute("title")).toBe("2026-10-01 14:16");
       const exact = window.document.querySelector(".ledger-time time")!;
-      expect(exact.textContent).toBe("2026-10-01 21:16:42");
+      expect(exact.textContent).toBe("2026-10-01 14:16:42");
       expect(exact.getAttribute("title")).toBe("2026-10-01T21:16:42.123Z");
       expect(window.document.querySelector("#lead time")!.textContent).toBe("3 min ago");
       expect(window.document.querySelector("#thread time")!.textContent).toBe("09:39");

@@ -230,12 +230,12 @@ describe("one source for requirements, checks and times (c2)", () => {
     const window = new Window();
     try {
       window.document.body.innerHTML = task;
-      const times = [...window.document.querySelectorAll("time[data-when]")];
+      // Every stamp on the page, not only the ones already marked: none is left in UTC words beside the viewer's.
+      const times = [...window.document.querySelectorAll("time[datetime]")];
       expect(times.length).toBeGreaterThan(0);
       localizeTimes(window.document as unknown as ParentNode, now, zone);
       for (const node of times) {
         const iso = node.getAttribute("datetime")!;
-        if (node.hasAttribute("data-elapsed-since")) continue;
         expect(node.textContent, iso).toBe(shortWhen(iso, now, zone));
         expect(node.getAttribute("title"), iso).toBe(fullWhen(iso, zone));
       }

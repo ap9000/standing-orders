@@ -33,6 +33,8 @@
 
 One sentence under the headline says why and what's next, in plain words (e.g. "Checks passed on a1b2c3d. Review the change, then mark it complete.").
 
+Crew is not exempt: it reads the Tasks list's own words for each task, the headline a list row wears outside a group. The list's group headings (Decide, Review, Unblock) and ask chips only arrange the list, so Crew never shows them in place of the headline.
+
 **2. Details as a quiet list underneath**, one row each, neutral text with a small icon. Colour only on the icon, and only when it matters:
 
 - Project checks: passed / failed / running / couldn't run. A quick check says so ("Quick checks passed on a1b2c3d"); Off reads "Off" with **Run checks**; a follow-up check reads "Full checks running"

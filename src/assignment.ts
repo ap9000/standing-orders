@@ -15,6 +15,7 @@ import { reproveApprover, type VerifiedApprover } from "./principal.js";
 import { noteAssignmentStatus } from "./assignment-status.js";
 import { historicalAssessmentReason } from "./assignment-presentation.js";
 import { manualReviewOnly } from "./proof.js";
+import { ACCEPT_NEEDS_REASON, cantAcceptYetOf } from "./result-acts.js";
 import { runCheckLevel, type CheckLevel } from "./check-levels.js";
 import { followUpChecksOf, withFollowUps } from "./result-follow-ups.js";
 import { buildReviewOf, findingWords, type BuildReviewView } from "./review-switch.js";
@@ -470,19 +471,20 @@ export function personCheckPending(receipt: AssignmentReceipt | null): boolean {
 type Finished = { ok: true } | { ok: false; reason: string; message: string };
 class Undone extends Error { constructor(readonly result: { ok: false; reason: string; message: string }) { super(result.message); } }
 
-/** An acceptance this receipt owes before it finishes: the person's own check (no reason needed), or an
- * exception the proof needs and the person gave a reason for. Null when Accept and finish is a plain
- * completion: nothing is owed, it was already accepted, or an exception came without its reason. */
-export function owedAcceptance(receipt: AssignmentReceipt | null, note: string | null): "person-check" | "exception" | null {
+/** An acceptance this receipt owes before it finishes, by the result page's own rule: the person's own check
+ * (no reason needed), or an exception a report that doesn't match its changes needs a reason for. Null when
+ * Accept and finish is a plain completion: nothing is owed (no proof, a failed check, or a verified result),
+ * or it was already accepted. */
+export function owedAcceptance(receipt: AssignmentReceipt | null): "person-check" | "exception" | null {
   if (receipt === null || receipt.proofAcceptance !== null) return null;
   if (personCheckPending(receipt)) return "person-check";
-  return note !== null && receipt.proof?.verdict !== "verified" && receipt.proof?.verdict !== "attested" ? "exception" : null;
+  return cantAcceptYetOf(receipt.proof?.verdict ?? null, receipt.proof?.reasons ?? [], false) === ACCEPT_NEEDS_REASON ? "exception" : null;
 }
 
 /** Accept and finish: the person's acceptance of the exact result they read and its completion, in one
  * transaction. Whether an acceptance is owed is decided here, against the receipt as it stands: only a
- * person's own check or a reasoned exception records one (with its ledger act); anything else is the plain
- * completion Mark complete always was. The completion names the receipt the acceptance produced, under the
+ * person's own check or a reasoned exception records one (with its ledger act); an exception without its
+ * reason is refused; anything else is the plain completion Mark complete always was. The completion names the receipt the acceptance produced, under the
  * same digest a separate Accept then Mark complete leave. `receiptDigest` is the receipt as read, before
  * accepting (`runId`, when named, must be its run); any other change refuses both, and a refused completion
  * keeps no acceptance. `finish` completes the receipt (Mark complete by default; Complete and open a pull
@@ -501,7 +503,9 @@ export function acceptAndCompleteAsOperator(store: Store, taskId: string, input:
         return { ok: false, reason: "stale", message: "This result changed. Open the current result before accepting it." };
       }
       // Already complete, or nothing owed: the plain completion of the receipt as read.
-      const owed = before.state === "ready-to-check" ? owedAcceptance(receipt, input.note) : null;
+      const owed = before.state === "ready-to-check" ? owedAcceptance(receipt) : null;
+      // An exception is accepted only with its reason: never a completion that skips it.
+      if (owed === "exception" && input.note === null) return { ok: false, reason: "needs-reason", message: `${ACCEPT_NEEDS_REASON}.` };
       let digest = receipt.digest;
       if (owed !== null) {
         store.acceptProof(receipt.runId, who.name, input.note, now);

@@ -1,5 +1,6 @@
 import type { LedgerEntry } from "./action-ledger.js";
 import { projectName } from "./project.js";
+import { exactWhenHtml } from "./when-html.js";
 
 const html = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 
@@ -62,7 +63,7 @@ export function ledgerBody(rows: LedgerEntry[], projects: readonly string[], par
 <div class="ledger-list" aria-label="Action history"><div class="ledger-event ledger-labels" aria-hidden="true"><span>Time (UTC)</span><span>Actor</span><span>Action</span><span>Project / work</span><span>Outcome / event</span></div>${shown.length === 0 ? `<p class="ledger-empty">No actions match these filters yet.</p>` : shown.map(row => {
     const subject = row.runId !== null ? `<a href="/r/${row.runId}">Run #${row.runId}</a>` : row.taskId !== null ? `<a href="/t/${encodeURIComponent(row.taskId)}">${html(row.taskId)}</a>` : "";
     const byActor = new URLSearchParams(fresh); byActor.set("actor", row.actor);
-    return `<article class="ledger-event" data-ledger-id="${row.id}"><div class="ledger-time"><time datetime="${html(row.at)}" title="${html(row.at)}">${html(row.at.slice(0, 19).replace("T", " "))}</time></div><div class="ledger-actor"><a class="actor" href="/ledger?${html(byActor.toString())}" title="Filter by this actor">${html(row.actor)}</a></div><div class="ledger-action">${html(row.action)}${row.detail === null ? "" : `<small class="ledger-detail">${html(row.detail)}</small>`}</div><div class="ledger-place">${row.repo === null ? "Instance" : html(projectName(row.repo))} ${subject}</div><div class="ledger-result">${html(row.outcome)}<small>${html(row.source)}</small></div></article>`;
+    return `<article class="ledger-event" data-ledger-id="${row.id}"><div class="ledger-time">${exactWhenHtml(row.at)}</div><div class="ledger-actor"><a class="actor" href="/ledger?${html(byActor.toString())}" title="Filter by this actor">${html(row.actor)}</a></div><div class="ledger-action">${html(row.action)}${row.detail === null ? "" : `<small class="ledger-detail">${html(row.detail)}</small>`}</div><div class="ledger-place">${row.repo === null ? "Instance" : html(projectName(row.repo))} ${subject}</div><div class="ledger-result">${html(row.outcome)}<small>${html(row.source)}</small></div></article>`;
   }).join("")}</div>
 <p class="row"><a href="/ledger?${html(fresh.toString())}">Newest actions</a>${more ? `<a rel="next" href="/ledger?${html(next.toString())}">Older actions</a>` : ""}</p>
 <p class="meta">Accepted requests record acceptance; worker events record results. History starts from this upgrade. Review evidence is on each task or run.</p>`;

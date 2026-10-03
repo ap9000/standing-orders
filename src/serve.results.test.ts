@@ -1170,7 +1170,7 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(read().state).toBe("complete");
   });
 
-  test("a crafted Accept and finish records an acceptance only for a person's check or a reasoned exception; otherwise it is a plain completion", async () => {
+  test("a crafted Accept and finish records an acceptance only for a person's check or a reasoned exception, refuses an exception without its reason, and is otherwise a plain completion", async () => {
     const mismatch = { verdict: "refuted" as const, reasons: ["a criterion cites a file that did not change"] };
     const patch = "diff --git a/z b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-a\n+b\n";
     const bare = build("t-bare", seed("t-bare", "Round the totals"), { patch, stat: [{ path: "z", additions: 1, deletions: 1 }] });
@@ -1187,16 +1187,20 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(form).toContain('name="accept" value="1"');
     expect(form).toMatch(/<input type="text"[^>]*name="note"[^>]*required/);
     const csrf = csrfOf(html);
-    // Nothing owed (no proof at all): accept=1 is the plain completion, no acceptance.
-    expect((await post(cookie, "/t/t-bare/complete", { csrf, run: String(bare), receipt: read("t-bare").receipt!.digest, accept: "1" })).status).toBe(303);
+    // Nothing owed (no proof at all, as the page asks for none): accept=1 is the plain completion, no acceptance, even with a note.
+    expect((await post(cookie, "/t/t-bare/complete", { csrf, run: String(bare), receipt: read("t-bare").receipt!.digest, accept: "1", note: "Looks fine." })).status).toBe(303);
     expect(read("t-bare").state).toBe("complete");
     expect(store.proofAcceptance(bare)).toBeNull();
     expect(acceptances("t-bare")).toEqual({ n: 0 });
-    // A mismatch posted without its reason: no acceptance is recorded; it completes as Mark complete would, its verdict unchanged.
+    // A mismatch posted without its reason (the form's required attribute bypassed): the server refuses it, in the page's
+    // words; nothing is accepted or completed, its verdict unchanged.
     const verdict = store.proofVerdictFor(silent);
-    expect((await post(cookie, "/t/t-silent/complete", { csrf, run: String(silent), receipt: read("t-silent").receipt!.digest, accept: "1" })).status).toBe(303);
-    expect(read("t-silent").state).toBe("complete");
-    expect(read("t-silent").receipt!.completionKind).not.toBe("accepted-exception");
+    for (const note of [undefined, "   "]) {
+      const refused = await post(cookie, "/t/t-silent/complete", { csrf, run: String(silent), receipt: read("t-silent").receipt!.digest, accept: "1", ...(note === undefined ? {} : { note }) });
+      expect(refused.status).toBe(400);
+      expect(await refused.text()).toContain("Accepting needs a reason");
+    }
+    expect(read("t-silent").state).toBe("ready-to-check");
     expect(store.proofAcceptance(silent)).toBeNull();
     expect(acceptances("t-silent")).toEqual({ n: 0 });
     expect(store.proofVerdictFor(silent)).toEqual(verdict);
@@ -1338,10 +1342,22 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(anyway).toMatch(/<input(?=[^>]*\bname="note")(?=[^>]*\brequired)[^>]*>/);
     expect(anyway).toMatch(/data-act="accept-anyway"[^>]*>.*Accept anyway<\/button>/);
     expect(anyway).not.toContain("data-ink-act");
-    // Without a reason it is refused; with one it is accepted and the page comes back without the act.
+    expect(anyway).toContain(`name="return" value="${page.replaceAll("&", "&amp;")}"`);
+    // Without a reason it is refused: posted from this result page, back to it with the refusal said there, not a task screen.
     const csrf = csrfOf(await (await fetch(url("/t/t-builtfail"), { headers: { cookie } })).text());
-    expect((await post(cookie, "/t/t-builtfail/accept-proof", { csrf, run: String(run), return: page })).status).toBe(400);
+    const refused = await post(cookie, "/t/t-builtfail/accept-proof", { csrf, run: String(run), return: page });
+    expect(refused.status).toBe(303);
+    expect(refused.headers.get("location")).toBe(`${page}&refused=reason`);
     expect(store.proofAcceptance(run)).toBeNull();
+    const told = await (await fetch(url(`${page}&refused=reason&format=workspace`), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
+    expect((told.view as import("./browser-workspace.js").BrowserResultView).selected!.problem).toBe("Accepting anyway needs a reason.");
+    expect(await (await fetch(url(`${page}&refused=reason`), { headers: { cookie } })).text()).toContain("Accepting anyway needs a reason.");
+    // Only the fixed refusal words: an address can't put its own text on the page.
+    expect((await read()).selected!.problem).toBeNull();
+    const forged = await (await fetch(url(`${page}&refused=${encodeURIComponent("Your account is locked")}&format=workspace`), { headers: { cookie } })).json() as import("./browser-workspace.js").BrowserWorkspace;
+    expect((forged.view as import("./browser-workspace.js").BrowserResultView).selected!.problem).toBeNull();
+    // Posted from anywhere else, the task screen says it.
+    expect((await post(cookie, "/t/t-builtfail/accept-proof", { csrf, run: String(run) })).status).toBe(400);
     const accepted = await post(cookie, "/t/t-builtfail/accept-proof", { csrf, run: String(run), return: page, note: "The flag stays for one release on purpose." });
     expect(accepted.status).toBe(303);
     expect(store.proofAcceptance(run)).toMatchObject({ note: "The flag stays for one release on purpose." });
@@ -1866,6 +1882,9 @@ describe("the review cockpit (Priority 5): a ranked, verified projection of comp
     expect(oldReceipt.headers.get("location")).toBe(`/t/${root}?version=${made[0]}`);
     const oldTask = await fetch(url(`/t/${made[0]}`), { headers: { cookie }, redirect: "manual" });
     expect(oldTask.headers.get("location")).toBe(`/t/${root}?version=${made[0]}`);
+    // Chat's Edit plan names the version's own address; the editor is still asked for after the redirect.
+    const editing = await fetch(url(`/t/${made[0]}?edit=plan`), { headers: { cookie }, redirect: "manual" });
+    expect(editing.headers.get("location")).toBe(`/t/${root}?version=${made[0]}&edit=plan`);
     expect(await read(`/t/${root}?version=${root}`)).toContain("Viewing Original");
     expect((await fetch(url(`/t/${root}?version=other-version`), { headers: { cookie } })).status).toBe(404);
     expect(factsOf(await read(`/chat?task=${root}&result=${otherRun}`)).some(one => one.run === String(otherRun))).toBe(false);

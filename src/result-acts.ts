@@ -22,8 +22,37 @@
  * acceptance, when one is owed, and the completion together. This only decides
  * which act is ink; the page recomputes it as the person answers each check. */
 
+import type { ProofVerdict } from "./proof.js";
+
 /** The words over the reason field an Accept of a refuted result requires. */
 export const ACCEPT_NEEDS_REASON = "Accepting needs a reason";
+
+/** What kind of evidence problem a verdict records: a check the machine
+ * actually ran and saw fail, evidence that contradicts the sealed record
+ * (a mismatched changed-path claim, an altered criterion, a caveat that
+ * contradicts a met verdict), or evidence that is simply absent. A generic
+ * refuted verdict is NOT a failed test claim — only the verify-command
+ * reasons say a check failed. */
+export type EvidenceProblem = "checks-failed" | "mismatched" | "missing" | "none";
+
+export const FAILED_CHECK = /^the repository's approved verification command exited (-?[0-9]+)/;
+
+export function evidenceProblemOf(verdict: ProofVerdict | null, reasons: readonly string[]): EvidenceProblem {
+  if (verdict === "verified" || verdict === "attested") return "none";
+  if (verdict === "refuted") return reasons.some(reason => FAILED_CHECK.test(reason)) ? "checks-failed" : "mismatched";
+  return "missing";
+}
+
+/** Why a result can't be accepted as it stands, in one plain line, or null
+ * when nothing refutes it (a person's acceptance settles it). The result page
+ * shows it before Request changes, its one ink act. */
+export function cantAcceptYetOf(verdict: ProofVerdict | null, reasons: readonly string[], accepted: boolean): string | null {
+  if (accepted || verdict !== "refuted") return null;
+  // A mismatch is the status card's own headline; here only what accepting takes.
+  return evidenceProblemOf(verdict, reasons) === "checks-failed"
+    ? "Can't accept yet: the project's check failed on these changes."
+    : ACCEPT_NEEDS_REASON;
+}
 
 export type ResultActKind = "retry" | "accept" | "accept-anyway" | "next-check" | "checks-running" | "run-checks" | "request-changes" | "rebuild" | "confirm-stopped" | "revise" | "draft-repair";
 
