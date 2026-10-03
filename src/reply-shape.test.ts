@@ -140,6 +140,41 @@ describe("one reply shaper, every channel", () => {
     expect(shapeReplyParts("Para one.\n\nPara two is here.", 20)).toEqual(["Para one.", "Para two is here."]);
   });
 
+  test("parts are measured as the channel renders them: escapes that lengthen a part cut it again", () => {
+    const escaped = (shaped: string): number => renderReply(shaped, "slack").length;
+    const reply = Array.from({ length: 40 }, (_, index) => `**N${index}** a<b & c>d https://docs.example.org/${index}?x=1&y=2`).join(" ");
+    const parts = shapeReplyParts(reply, 200, { appOrigin: ORIGIN }, escaped);
+    expect(parts.length).toBeGreaterThan(1);
+    for (const part of parts) expect(escaped(part)).toBeLessThanOrEqual(200);
+    const joined = parts.join(" ");
+    for (let index = 0; index < 40; index++) expect(joined).toContain(`[docs.example.org](https://docs.example.org/${index}?x=1&y=2)`);
+    expect(joined.match(/a<b & c>d/g)).toHaveLength(40);
+  });
+
+  test("a cut always moves forward: an emoji at the cut is kept whole, never looped on", () => {
+    expect(shapeReplyParts("👍👍👍", 1)).toEqual(["👍", "👍", "👍"]);
+    expect(shapeReplyParts("ab👍cd", 3)).toEqual(["ab", "👍c", "d"]);
+    // A part that renders longer than the cap around an emoji still ends.
+    expect(shapeReplyParts("👍x👍", 2, {}, shaped => shaped.length * 2).join("")).toBe("👍x👍");
+    for (const part of shapeReplyParts("😀".repeat(50), 7)) expect(part).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/);
+  });
+
+  test("a URL is never cut, even one longer than a part, and a cut never lands inside a link", () => {
+    const url = `https://docs.example.org/${"a".repeat(80)}`;
+    const parts = shapeReplyParts(`See ${url} and more words after it`, 30);
+    expect(parts).toContain(`[docs.example.org](${url})`);
+    expect(parts.join(" ")).toContain("more words after it");
+    const linked = shapeReplyParts(`[docs](${url})x and then the rest`, 20);
+    expect(linked[0]).toBe(`[docs.example.org](${url})`);
+    expect(linked.join("")).toContain("x and then the rest");
+    for (const size of [10, 25, 40]) {
+      // No space to cut at: each part ends before the next link, never inside one.
+      const many = shapeReplyParts(Array.from({ length: 6 }, (_, index) => `https://x.example.org/${index}/${"p".repeat(20)}`).join("\u00a0"), size);
+      for (const part of many) expect(part).toMatch(/^\u00a0?\[x\.example\.org\]\(https:\/\/x\.example\.org\/\d\/p{20}\)\u00a0?$/);
+      expect(many).toHaveLength(6);
+    }
+  });
+
   test("each channel escapes its own syntax around what the shaper keeps", () => {
     expect(renderReply(shapeReply("a <b> & c"), "slack")).toBe("a &lt;b&gt; &amp; c");
     expect(renderReply(shapeReply("use @here and _x_"), "discord")).toBe("use @​here and \\_x\\_");

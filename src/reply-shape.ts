@@ -195,12 +195,14 @@ export function shapeReply(text: string, options: ShapeOptions = {}): string {
   return shapeWith(text, options, stateFor(text, options));
 }
 
-/** Where a long reply may be cut: never inside code, a link, a URL or a bold anchor; best at a paragraph, then a line, then a space. */
+/** Where a long reply may be cut: never inside code, a link, a URL or a bold anchor; best at a paragraph, then a line,
+ * then a space. Always past `from`, and never between the two halves of an emoji. */
 function cutAt(text: string, from: number, size: number): number {
-  const limit = from + size;
+  const limit = from + Math.max(1, size);
   if (limit >= text.length) return text.length;
-  const tokens = [...text.matchAll(new RegExp(String.raw`${PROTECTED.source}|\*\*[^*\n]+?\*\*`, "g"))]
-    .map(one => ({ start: one.index ?? 0, end: (one.index ?? 0) + one[0].length }));
+  const flags = PROTECTED.flags.includes("g") ? PROTECTED.flags : `${PROTECTED.flags}g`;
+  const tokens = [...text.matchAll(new RegExp(String.raw`${PROTECTED.source}|\*\*[^*\n]+?\*\*`, flags))]
+    .map(one => ({ start: one.index ?? 0, end: (one.index ?? 0) + one[0].length, url: !one[0].startsWith("`") && !one[0].startsWith("**") }));
   const inside = (at: number): boolean => tokens.some(token => token.start < at && at < token.end);
   for (const gap of [/\n\n/g, /\n/g, /[ \t]/g]) {
     let best = -1;
@@ -210,40 +212,46 @@ function cutAt(text: string, from: number, size: number): number {
     }
     if (best > from) return best;
   }
-  // No gap: cut before the token that crosses the limit, else at the limit itself (a token longer than a part).
+  // No gap: cut before the token that crosses the limit. A link or URL longer than a whole part stays whole (cut, it
+  // would no longer go where it says); only code or plain text longer than a part is cut at the limit itself.
   const crossing = tokens.find(token => token.start < limit && limit < token.end);
-  let end = crossing !== undefined && crossing.start > from ? crossing.start : limit;
-  if (/[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
+  if (crossing !== undefined && crossing.start > from) return crossing.start;
+  if (crossing !== undefined && crossing.url) return crossing.end;
+  let end = limit;
+  if (/[\uD800-\uDBFF]/.test(text[end - 1]!)) end = end - 1 > from ? end - 1 : end + 1;
   return end;
 }
 
 /**
  * A long reply split into parts of at most `size` characters, then each part shaped: the cut is made on the reply as
  * written, at a paragraph or line where possible and never inside code, a link or a bold anchor, so no part carries
- * half of one. The parts share one bold budget and one rule for ids, as if the reply were shaped whole.
+ * half of one. The parts share one bold budget and one rule for ids, as if the reply were shaped whole. `measure` is
+ * how long a shaped part is once the channel renders it (its own link and escape format): a part that renders past
+ * `size` is cut again, smaller. Only a single link longer than a part can exceed it, and it is never cut.
  */
-export function shapeReplyParts(text: string, size: number, options: ShapeOptions = {}): string[] {
+export function shapeReplyParts(text: string, size: number, options: ShapeOptions = {}, measure: (shaped: string) => number = shaped => shaped.length): string[] {
   const state = stateFor(text, options);
   const normal = text.replace(/\r\n?/g, "\n");
-  const raw: string[] = [];
-  for (let at = 0; at < normal.length;) {
-    const end = cutAt(normal, at, size);
-    raw.push(normal.slice(at, end));
-    at = end;
-  }
+  const pieces = (part: string, at: number): string[] => {
+    const out: string[] = [];
+    for (let from = 0; from < part.length;) { const end = cutAt(part, from, at); out.push(part.slice(from, end)); from = end; }
+    return out;
+  };
+  const raw = pieces(normal, size);
   const parts: string[] = [];
   while (raw.length > 0) {
     const part = raw.shift()!;
     const before = state.boldLeft;
     const shaped = shapeWith(part, options, state);
-    // A labelled link can lengthen a part: cut that part again, smaller, and shape the pieces.
-    if (shaped.length > size && part.length > 1) {
-      state.boldLeft = before;
-      const smaller = Math.max(1, Math.floor(part.length * size / shaped.length) - 1);
-      const pieces: string[] = [];
-      for (let at = 0; at < part.length;) { const end = cutAt(part, at, smaller); pieces.push(part.slice(at, end)); at = end; }
-      raw.unshift(...pieces);
-      continue;
+    const length = measure(shaped);
+    // A labelled link or the channel's escapes can lengthen a part: cut that part again, smaller, and shape the pieces.
+    if (length > size && part.length > 1) {
+      const smaller = pieces(part, Math.max(1, Math.floor(part.length * size / length) - 1));
+      if (smaller.length > 1) {
+        state.boldLeft = before;
+        raw.unshift(...smaller);
+        continue;
+      }
     }
     if (shaped !== "") parts.push(shaped);
   }

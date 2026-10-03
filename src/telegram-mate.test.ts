@@ -400,6 +400,28 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(script.sends().at(-1)!.params["entities"]).toBeUndefined();
   });
 
+  test("a long reply full of links, bold and & or < goes out in parts Telegram accepts, each link whole as an entity", async () => {
+    origin = "https://so.example.com";
+    const urls = Array.from({ length: 200 }, (_, index) => `https://docs.example.org/guide/${index}?a=1&b=2`);
+    answers.push({ text: urls.map((url, index) => `**Step ${index}** a<b & c: ${url}`).join(" ") });
+    script.updates.push([textUpdate(2, "send me the guide links")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+    const sent = script.sends().filter(call => call.method === "sendMessage");
+    expect(sent.length).toBeGreaterThan(1);
+    const links: string[] = [];
+    for (const call of sent) {
+      const text = String(call.params["text"]);
+      expect(text.length).toBeLessThanOrEqual(4096);
+      expect(text).not.toMatch(/\*\*|\]\(/);
+      for (const entity of (call.params["entities"] ?? []) as Array<{ type: string; offset: number; length: number; url?: string }>) {
+        expect(entity.offset + entity.length).toBeLessThanOrEqual(text.length);
+        if (entity.type === "text_link") { expect(text.slice(entity.offset, entity.offset + entity.length)).toBe("docs.example.org"); links.push(entity.url!); }
+      }
+    }
+    expect(links).toEqual(urls);
+    expect(sent.map(call => String(call.params["text"])).join(" ").match(/a<b & c/g)).toHaveLength(200);
+  });
+
   test("a teammate's question arrives with its options and Answer in words; a tap answers it once, a stale tap changes nothing, and a reply answers in words (v93)", async () => {
     const flow = store.createFlow({ repo, name: "Support", by: "alex", definitionJson: JSON.stringify({ version: 1, start: "inbox", stages: [{ id: "inbox", title: "Inbox", kind: "inbox", zone: {}, next: null, onFail: null }] }) }, now);
     const mate = store.createTeammate({ repo, handle: "maya", soul: TEAMMATE_TEMPLATES[0]!.soul, model: null, manager: "alex", by: "alex" }, now);

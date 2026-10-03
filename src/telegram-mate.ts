@@ -633,7 +633,7 @@ async function runTelegramConversation(row: TelegramConversation, args: TurnArgs
     try {
       return store.transact(() => {
         const now = clock();
-        const parts: Parameters<Store["planTelegramConversationParts"]>[3][number][] = shapeReplyParts(reply, PART_CAP, { asked: row.text, appOrigin: options.phoneOrigin?.() ?? null }).map((text, index) => ({ kind: "reply", text, replyTo: index === 0 ? row.messageId : null }));
+        const parts: Parameters<Store["planTelegramConversationParts"]>[3][number][] = shapeReplyParts(reply, PART_CAP, { asked: row.text, appOrigin: options.phoneOrigin?.() ?? null }, shaped => telegramReply(shaped).text.length).map((text, index) => ({ kind: "reply", text, replyTo: index === 0 ? row.messageId : null }));
         // The lead's question to its owner: one tap per option, then "Something else".
         const ask = store.mateAsk(turn);
         if (ask !== null) parts.push({ kind: "reply", text: phoneText(ask.question, 1_000), keyboard: askKeyboard(ask) });

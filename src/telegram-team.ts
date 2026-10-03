@@ -262,8 +262,9 @@ export async function deliverTeamChats(
       const skip = role === "operator" && (ownMessage || status === "cancelled" || String(message["author"] ?? "").length === 0);
       const prefix = `telegram-team:${chat.id}:`;
       if (!skip) {
-        // The lead's reply is split as written, then each part shaped, so no cut lands inside a link.
-        const text = role === "assistant" ? shapeReplyParts(String(message["text"]), PART_CAP, { appOrigin: phoneOrigin?.() ?? null }).map(part => renderReply(part, "telegram")) : `${phoneText(String(message["author"]), 40)}: ${String(message["text"])}`;
+        // The lead's reply is split as written, then each part shaped and measured as Telegram shows it, so no cut lands
+        // inside a link and no rendered part passes Telegram's ceiling.
+        const text = role === "assistant" ? shapeReplyParts(String(message["text"]), PART_CAP, { appOrigin: phoneOrigin?.() ?? null }, shaped => renderReply(shaped, "telegram").length).map(part => renderReply(part, "telegram")) : `${phoneText(String(message["author"]), 40)}: ${String(message["text"])}`;
         const sent = await sendParts(store, transport, chat.chatId, text, `${prefix}message:${id}`, clock, access, report);
         if (sent !== null) { report.problems.push(`team chat ${chat.chatId}: ${sent}`); break; }
       }
