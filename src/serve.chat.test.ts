@@ -341,6 +341,27 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     expect(workspace.leadName).toBe("Maya");
   });
 
+  test("c1: Settings → Lead edits what your lead knows about you, one line each, and refuses a note that is too long", async () => {
+    await boot();
+    const cookie = await login();
+    const html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    expect(html).toContain("What your lead knows about you");
+    expect(html).toContain('action="/settings/lead/about"');
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+    const save = (about: string) => fetch(url("/settings/lead/about"), { method: "POST", headers: { cookie, origin: base }, redirect: "manual", body: new URLSearchParams({ csrf, about }) });
+    const refused = await save(Array.from({ length: 21 }, (_, index) => `Line ${index}`).join("\n"));
+    expect(decodeURIComponent(refused.headers.get("location") ?? "")).toContain("Keep it to 20 lines.");
+    expect(store.leadAbout("alex")).toEqual([]);
+    const saved = await save("Keep copy terse.\n\nI test changes myself.\n");
+    expect(saved.headers.get("location")).toBe("/settings/lead?saved=about");
+    expect(store.leadAbout("alex")).toEqual(["Keep copy terse.", "I test changes myself."]);
+    // Saving the name and persona keeps the note.
+    await fetch(url("/settings/lead/identity"), { method: "POST", headers: { cookie, origin: base }, redirect: "manual", body: new URLSearchParams({ csrf, name: "Maya", persona: "Short." }) });
+    expect(store.leadAbout("alex")).toEqual(["Keep copy terse.", "I test changes myself."]);
+    const again = await (await fetch(url("/settings/lead?saved=about"), { headers: { cookie } })).text();
+    expect(again).toContain(">Keep copy terse.\nI test changes myself.</textarea>");
+  });
+
   test("chat is configurable from the console itself — password-gated, key stays environment-only", async () => {
     store.clearChatConfig();
     await boot();
