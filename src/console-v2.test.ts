@@ -101,6 +101,8 @@ describe("console v2: the thread, Details, the home and the Inbox tabs keep ever
     view.statusHtml, view.approval, view.questions, ...view.lead.map(one => one.html),
     ...(view.thread ?? []).flatMap(one => [one.html, one.more?.html ?? ""]),
     ...view.sections.map(one => one.html), ...view.manage.map(one => one.html), view.cancel?.html ?? "",
+    // Stop on the Building card is rendered from data, not HTML.
+    view.stop == null ? "" : `<form method="post" action="${view.stop.action}">`,
   ].join("\n");
   const formsOf = (html: string): string[] => [...html.matchAll(/<form\b[^>]*\baction="([^"]+)"/g)].map(match => match[1]!).sort();
   const stepUps = (html: string): number => (html.match(/type="password"/g) ?? []).length;

@@ -1757,7 +1757,7 @@ describe("the task detail (portfolio arc, slice 1c): the attempt panel, the rail
     // region promising a look that cannot land.
     const pane = await (await fetch(url("/workbench?t=t-live"), { headers: { cookie } })).text();
     expect(pane).toContain(`Build #${run} · night-shift-1 · running`);
-    expect(pane).toContain("the live view is on the build page");
+    expect(pane).toContain("The live view is on the build page");
     expect(pane).toContain(`href="/r/${run}">full build view →`);
     expect(pane).not.toContain('id="run-peek"');
     expect(pane).not.toContain(`/r/${run}?fragment=peek`);
