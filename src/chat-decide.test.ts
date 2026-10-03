@@ -429,9 +429,10 @@ describe("decisions finish in the chat app", () => {
     await tapIn(BOB, script.current(BOB, card.messageId).token(/^Yes$/), card.messageId);
     expect(merges).toEqual([{ runId: run, by: "bob" }]);
     expect(script.current(BOB, card.messageId).text).toBe(`${card.text}\n\n✓ Merged.`);
-    // Ledgered after GitHub answered, with what happened.
+    // The approval is ledgered with the tap; what GitHub did is its own line.
     const via = `via telegram · chat binding #${store.liveTelegramBindingFor(BOT, String(BOB))!.id} · mode ${store.activeMode(REPO, now)!.digest} · ${head.slice(0, 12)}`;
-    expect(store.handle.prepare("SELECT outcome, detail FROM action_ledger WHERE action = 'merge approved in chat'").all()).toEqual([{ outcome: "merged", detail: via }]);
+    expect(store.handle.prepare("SELECT outcome, detail FROM action_ledger WHERE action = 'merge approved in chat'").all()).toEqual([{ outcome: "approved", detail: via }]);
+    expect(store.handle.prepare("SELECT outcome, detail FROM action_ledger WHERE action = 'merge from chat'").all()).toEqual([{ outcome: "merged", detail: via }]);
     // A commit pushed after the card: the next card's Yes acts on nothing.
     store.handle.prepare("UPDATE pull_request_follow SET ready_head = ? WHERE publication = ?").run("c".repeat(40), publication);
     expect(mergeInChat(store, "merge-9", run, "bob", now)).toEqual({ ok: false, why: "This pull request changed since this card was sent." });
@@ -444,7 +445,7 @@ describe("decisions finish in the chat app", () => {
     await pass();
     const card = script.cardWith(BOB, /^Merge$/);
     await tapIn(BOB, card.token(/^Merge$/), card.messageId);
-    // Nothing is ledgered before GitHub answers.
+    // Nothing is ledgered before the Yes.
     mergeAnswer = { ok: false, message: "Checks are failing, so it can't merge." };
     expect(store.handle.prepare("SELECT 1 FROM action_ledger WHERE action = 'merge approved in chat'").all()).toEqual([]);
     await tapIn(BOB, script.current(BOB, card.messageId).token(/^Yes$/), card.messageId);
@@ -452,7 +453,8 @@ describe("decisions finish in the chat app", () => {
     expect(script.current(BOB, card.messageId).text).toBe(`${card.text}\n\n✗ Not merged: Checks are failing, so it can't merge.`);
     expect(script.current(BOB, card.messageId).labels).toEqual(["Open task ↗"]);
     const via = `via telegram · chat binding #${store.liveTelegramBindingFor(BOT, String(BOB))!.id} · mode ${store.activeMode(REPO, now)!.digest} · ${head.slice(0, 12)}`;
-    expect(store.handle.prepare("SELECT actor, task_id, run_id, outcome, detail FROM action_ledger WHERE action = 'merge approved in chat'").all())
+    expect(store.handle.prepare("SELECT outcome FROM action_ledger WHERE action = 'merge approved in chat'").all()).toEqual([{ outcome: "approved" }]);
+    expect(store.handle.prepare("SELECT actor, task_id, run_id, outcome, detail FROM action_ledger WHERE action = 'merge from chat'").all())
       .toEqual([{ actor: "bob", task_id: "merge-12", run_id: run, outcome: "failed", detail: `${via} · Checks are failing, so it can't merge.` }]);
   });
 

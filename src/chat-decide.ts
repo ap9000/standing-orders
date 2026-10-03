@@ -478,18 +478,21 @@ export function applyDecideTap(store: Store, seat: DecideSeat, input: { token: s
     case "merge": {
       const merge = mergeInChat(store, row.taskId, row.run ?? 0, who.name, now);
       if (!merge.ok) return notDone(merge.why);
-      // Ledgered once GitHub answers (recordChatMerge), with what actually happened.
-      return { ack: "Merging…", edit: { text: `${body}\n\nMerging…`, rows: [], tokens: [] }, merge: { runId: row.run ?? 0, taskId: row.taskId, by: who.name, repo: ref.repo,
-        via: `via ${seat.channel} · chat binding #${seat.binding} · mode ${merge.modeDigest} · ${merge.head.slice(0, 12)}` } };
+      const via = `via ${seat.channel} · chat binding #${seat.binding} · mode ${merge.modeDigest} · ${merge.head.slice(0, 12)}`;
+      // The approval is ledgered with the tap, so a bridge that stops before GitHub answers still leaves it on record;
+      // what GitHub then did is its own line (recordChatMerge).
+      store.recordAction({ at: now.toISOString(), actor: who.name, repo: ref.repo, taskId: row.taskId, runId: row.run ?? null, action: "merge approved in chat", outcome: "approved",
+        source: "request", detail: via });
+      return { ack: "Merging…", edit: { text: `${body}\n\nMerging…`, rows: [], tokens: [] }, merge: { runId: row.run ?? 0, taskId: row.taskId, by: who.name, repo: ref.repo, via } };
     }
     default:
       return { ack: "That button doesn't do anything now.", ignored: true };
   }
 }
 
-/** A chat merge's ledger line, after the GitHub call: merged, or failed and why. */
+/** A chat merge's second ledger line, after the GitHub call: merged, or failed and why (its approval is the first). */
 export function recordChatMerge(store: Store, merge: ChatMerge, result: { ok: true } | { ok: false; message: string }, now: Date): void {
-  store.recordAction({ at: now.toISOString(), actor: merge.by, repo: merge.repo, taskId: merge.taskId, runId: merge.runId, action: "merge approved in chat",
+  store.recordAction({ at: now.toISOString(), actor: merge.by, repo: merge.repo, taskId: merge.taskId, runId: merge.runId, action: "merge from chat",
     outcome: result.ok ? "merged" : "failed", source: "request", detail: result.ok ? merge.via : `${merge.via} · ${phoneText(result.message, 160)}` });
 }
 
