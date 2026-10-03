@@ -847,10 +847,11 @@ export async function planChatNotifications(
       if (
         notification.createdAt >= binding.created &&
         notification.resolvedAt === null &&
-        // A promise the lead made on another chat is reported there (lead-commitments.ts).
+        // A promise the lead made on another chat is reported there (lead-commitments.ts); one its owner asked for on
+        // this chat is always said here, however quiet the lead's own work is kept.
         (promiseChannelOf(notification) ?? state.channel) === state.channel &&
         // Pings follow responsibility: the lead's work, this person's own act and a muted project stay in the console.
-        store.pingAllowed(notification, binding.approver) &&
+        (promiseChannelOf(notification) === state.channel || store.pingAllowed(notification, binding.approver)) &&
         // A flow decision for "anyone who approves" reaches every approver who can see the project.
         // A notification addressed to this person reaches them whatever project
         // their channel follows (a sign-in pause is the installation's, v108).
@@ -868,7 +869,7 @@ export async function planChatNotifications(
         const quiet = !personal && isTaskFact(notification) && store.notificationPreference(binding.approver).mode === "quiet";
         if (notification.kind === LEAD_SAY_KIND) {
           // The lead's words (lead-voice.ts): one message, repainted in place when a later say joins it.
-          const content: ChatContent = { text: leadSayText(store, notification),
+          const content: ChatContent = { text: leadSayText(store, notification, binding.approver),
             ...(notification.link ? { link: { label: "Open", path: notification.link } } : {}) };
           const earlier = leadSayEarlier(store, notification).map(one => state.prepare("SELECT id FROM chat_part WHERE event=?")
             .get(chatHash(`${options.state.channel}:notice:${binding.id}:${one}`))).find(one => one !== undefined);

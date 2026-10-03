@@ -337,6 +337,8 @@ export type MateAsk = { turn: number; thread: number; question: string; options:
 export const MATE_ASK_OTHER = "Something else";
 /** How long the question's buttons work, on every channel. */
 export const MATE_ASK_TTL_MS = 7 * 86_400_000;
+/** What a turn the lead starts itself for automatic crew updates says in the owner's place (lead-follow.ts): never their answer. */
+export const LEAD_FOLLOW_MESSAGE = "Automatic crew update: inspect the saved results or decisions and tell me what needs attention. Do not rerun work.";
 
 /** Settings → Integrations (no version bump): each integration's last check. `outcome` is ok, failed, or absent (the check found
  * nothing set up, such as no `gh` sign-in). `ok_at` and `error`/`error_at` keep the last success and the last
@@ -23766,14 +23768,18 @@ export class Store {
     return { turn: Number(row["turn"]), thread: Number(row["thread"]), question: String(row["question"]), options: Array.isArray(options) ? options.map(String) : [], createdAt: String(row["created_at"]) };
   }
 
-  /** What a tap on the question finds: open; answered (the owner has written in its thread since the reply that asked it);
-   * or expired (older than MATE_ASK_TTL_MS, or the question or the reply that asked it is gone, as after a retention purge). */
+  /** What a tap on the question finds: open; answered (its owner has written in its thread since the reply that asked
+   * it, typed or tapped; a turn the lead started itself, or another person's message, is no answer); or expired (older
+   * than MATE_ASK_TTL_MS, or the question or the reply that asked it is gone, as after a retention purge). */
   mateAskState(turn: number, now: Date): { state: "open"; ask: MateAsk } | { state: "answered" | "expired" } {
     const ask = this.mateAsk(turn);
     if (ask === null) return { state: "expired" };
     const asking = this.db.prepare("SELECT MAX(id) AS id FROM mate_message WHERE thread = ? AND turn = ? AND role = 'assistant'").get(ask.thread, turn);
     if (asking === undefined || asking["id"] === null) return { state: "expired" };
-    const later = this.db.prepare("SELECT 1 AS hit FROM mate_message WHERE thread = ? AND role = 'operator' AND id > ? LIMIT 1").get(ask.thread, Number(asking["id"]));
+    const owner = String(this.getMateTurn(turn)!.approver);
+    const later = this.db.prepare(`SELECT 1 AS hit FROM mate_message m LEFT JOIN mate_turn t ON t.id = m.turn LEFT JOIN team_message tm ON tm.message = m.id
+        WHERE m.thread = ? AND m.role = 'operator' AND m.id > ? AND m.text <> ? AND COALESCE(tm.author, t.approver, ?) = ? LIMIT 1`)
+      .get(ask.thread, Number(asking["id"]), LEAD_FOLLOW_MESSAGE, owner, owner);
     if (later !== undefined) return { state: "answered" };
     if (new Date(ask.createdAt).getTime() + MATE_ASK_TTL_MS <= now.getTime()) return { state: "expired" };
     return { state: "open", ask };
@@ -27163,8 +27169,12 @@ export class Store {
           JOIN push_subscription s ON s.id = p.subscription JOIN notification n ON n.id = p.notification
           WHERE p.state = 'pending' AND p.attempts = 0 AND p.created_at = ?`).all(now.toISOString());
       for (const raw of fresh) {
-        if (!this.pingAllowed(readNotification(raw), String(raw["approver"]))) {
-          this.db.prepare("UPDATE push_delivery SET state = 'retired', last_error = 'quiet' WHERE id = ? AND state = 'pending'").run(Number(raw["pair"]));
+        // A met promise made on a chat app is said there (lead-commitments.ts), not as a push: settled here, unsent. One
+        // made in the console or app is this phone's own.
+        const elsewhere = /^lead-promise:(telegram|slack|discord|teams):/.test(String(raw["dedupe_key"]));
+        if (elsewhere || !this.pingAllowed(readNotification(raw), String(raw["approver"]))) {
+          this.db.prepare("UPDATE push_delivery SET state = 'retired', last_error = ? WHERE id = ? AND state = 'pending'")
+            .run(elsewhere ? TELEGRAM_SKIPPED_OTHER_CHAT : "quiet", Number(raw["pair"]));
         }
       }
     }

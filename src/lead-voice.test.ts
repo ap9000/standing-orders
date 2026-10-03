@@ -18,7 +18,7 @@ import { quietCardView } from "./chat-quiet.js";
 import { workIndexPage } from "./work-index.js";
 import { installationStatus, renderInstallationStatus } from "./lead-status.js";
 import { runOperate } from "./operate.js";
-import { LEAD_IDLE_MS, agoWords, enqueueLeadLapses, leadActivity, leadActivityLine, leadClaimOf, leadSubjectOf } from "./lead-voice.js";
+import { LEAD_IDLE_MS, agoWords, enqueueLeadLapses, leadActivity, leadActivityLine, leadClaimOf, leadSayText, leadSubjectOf } from "./lead-voice.js";
 import { browserCrewOf } from "./browser-workspace.js";
 import { withActor } from "./actor.js";
 import { leadLapsed, leadOnIt } from "./task-status.js";
@@ -328,6 +328,8 @@ describe("your lead tells you what it's doing", () => {
     expect(saved("lead-on-it").subject).toBe("Maya is on it");
     expect(leadSubjectOf(store, saved("lead-on-it"), "alex")).toBe("Sam is on it");
     expect(leadSubjectOf(store, { kind: "lead-lapsed", subject: LEAD_LAPSED, recipient: null }, "alex")).toBe(leadLapsed("Sam"));
+    // A lead-say row with no recipient reads the name of the reader's lead, as the chat it is shown in passes.
+    expect(leadSayText(store, { kind: "lead-say", subject: "Maya", body: "Fixing the release check", recipient: null }, "alex")).toBe("Sam\n\nFixing the release check");
     // Any other row keeps its own words.
     expect(leadSubjectOf(store, { kind: "run-finished", subject: "Maya's build finished", recipient: "alex" }, "alex")).toBe("Maya's build finished");
   });

@@ -1,7 +1,7 @@
 /** Durable crew updates for the built-in lead. Idle scans use no model.
  * Delivery replays reuse the saved mate request; they never dispatch a task. */
 import { createHash } from 'node:crypto';
-import type { Store, MateSession, MateThread, ChatConfig } from './store.js';
+import { LEAD_FOLLOW_MESSAGE, type Store, type MateSession, type MateThread, type ChatConfig } from './store.js';
 import { isVerifiedApprover, reproveApprover, verifyApproverStanding, type VerifiedApprover } from './principal.js';
 import { assignmentOf } from './assignment.js';
 import { runMateTurn, type MateTurnInput, type MateTurnOutcome } from './mate.js';
@@ -141,7 +141,7 @@ export async function runLeadFollowPass(input: LeadFollowInput): Promise<void> {
       const provider = input.provider();
       if (!provider) continue;
       const result = await (input.runTurn ?? runMateTurn)({ store, ...access, ...provider, evidenceRoot: input.evidenceRoot, clock,
-        requestId: batch.request, message: 'Automatic crew update: inspect the saved results or decisions and tell me what needs attention. Do not rerun work.',
+        requestId: batch.request, message: LEAD_FOLLOW_MESSAGE,
         context: batch.context, revalidate: async () => !updateAdmissionPaused(store.raw()) && authorized(store, grant, input.repos()) !== null ? { ok: true as const } : { ok: false as const, reason: 'Lead authorization ended.' },
         ...(input.fetcher ? { fetcher: input.fetcher } : {}), ...(input.subscriptionRunner ? { subscriptionRunner: input.subscriptionRunner } : {}) });
       if (!result.ok && 'refused' in result) {

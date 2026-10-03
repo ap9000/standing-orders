@@ -971,7 +971,7 @@ async function deliverOutboxTo(
     };
     /** The lead's words (lead-voice.ts): one message; a later say within two minutes edits it in place. */
     const leadSayOutcome = async (fact: TelegramDelivery): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> => {
-      const words = leadSayText(store, fact);
+      const words = leadSayText(store, fact, binding.approver);
       const button = fact.link === null ? null : factButton(phoneOrigin, fact.link);
       const keyboard = button === null ? [] : [button];
       const earlier = leadSayEarlier(store, fact).map(id => store.telegramMessageOf(id, fact.destination)).find(one => one !== null) ?? null;

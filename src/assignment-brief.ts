@@ -28,13 +28,19 @@ export type AssignmentCatchUp = {
   omissions: { assignments: number; decisions: number; projects: number; textFields: number; candidateScanLimited: boolean; notes: string[] };
 };
 
-/** A sentence's end: not an abbreviation's full stop ("e.g.", "i.e.", "etc."), and followed by a new sentence. */
-const SENTENCE_END = /(?<!\b(?:e\.g|i\.e|etc|vs|cf|approx|incl|Mr|Mrs|Ms|Dr|St|No))[.!?](?=\s+["'“(]?[\p{Lu}\p{N}])/u;
+/** A full stop, question or exclamation mark followed by a new sentence. */
+const SENTENCE_END = /[.!?](?=\s+["'“(]?([\p{Lu}\p{N}]))/gu;
+/** An abbreviation's full stop ("e.g.", "E.g.", "etc."), in any case; "No." only before a number ("No. 5"). */
+const ABBREVIATION = /\b(?:e\.g|i\.e|etc|vs|cf|approx|incl|mr|mrs|ms|dr|st)$/i;
 /** A reason's first sentence, or its first line. */
 export function firstSentenceOf(text: string): string {
   const line = text.split("\n")[0]!.trim();
-  const end = SENTENCE_END.exec(line);
-  return end === null ? line : line.slice(0, end.index + 1);
+  for (const end of line.matchAll(SENTENCE_END)) {
+    const before = line.slice(0, end.index);
+    if (end[0] === "." && (ABBREVIATION.test(before) || /\bno$/i.test(before) && /\p{N}/u.test(end[1]!))) continue;
+    return line.slice(0, end.index + 1);
+  }
+  return line;
 }
 
 /** A project's active decisions, newest first: each one's title and its reason in one line (first sentence or
