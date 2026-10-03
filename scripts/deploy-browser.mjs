@@ -267,6 +267,12 @@ function restoreDeploymentBackup(r) {
   return kept;
 }
 function fsyncFile(path) { const fd = openSync(path, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } }
+/** What restore puts back for the coding database the stopped service left: its verified backup, null when there was no
+ * coding database to back up, or undefined when one exists without a backup, which restore then leaves alone. */
+function codingBackupBeforeSwap(r) {
+  if (r.codingBackupHash !== undefined) return r.codingBackupHash;
+  return existsSync(`${database}.coding.sqlite`) ? undefined : null;
+}
 /** The previous definition, loaded again once its processes were proved gone, and only on the schema it runs.
  * Restored means it runs from its runtime and answers /healthz. */
 function restorePriorService(r) {
@@ -463,7 +469,7 @@ async function swap() {
   await verifyServiceStopped(oldPids);
   await ensureCodingBackup(oldRt.coding, r);
   // The coding database as the stopped service left it; a failed deployment puts this back with orders.db.
-  r.codingBackupBeforeSwap = r.codingBackupHash ?? null;
+  r.codingBackupBeforeSwap = codingBackupBeforeSwap(r);
   save(r, "stopped");
   // An older runtime killed before its close left its coding owner record behind: with every old
   // process proved gone, the candidate's own check releases it (ledgered) instead of failing here.

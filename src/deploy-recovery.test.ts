@@ -113,13 +113,13 @@ test('Ctrl-C or a kill runs the same exit recovery, and a second signal waits fo
 });
 
 /** deploy-browser's exact backup restore, run against scratch files without its launchd entry point. */
-function backupRestore(stageDir: string, database: string) {
+function backupRestore(stageDir: string, database: string, name = 'restoreDeploymentBackup') {
   const source = readFileSync(resolve('scripts/deploy-browser.mjs'), 'utf8');
   const body = source.slice(source.indexOf('function restoreDeploymentBackup('), source.indexOf('/** The previous definition, loaded again'));
   const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
   const open = (file: string, options = {}) => new DatabaseSync(file, options);
   return new Function('fs', 'sha', 'join', 'dirname', 'randomUUID', 'stageDir', 'database', 'openDeploymentDatabase', 'ledgerStaleCodingRelease',
-    `const { existsSync, lstatSync, readFileSync, copyFileSync, chmodSync, rmSync, renameSync, openSync, fsyncSync, closeSync } = fs;\n${body}\nreturn restoreDeploymentBackup;`)(
+    `const { existsSync, lstatSync, readFileSync, copyFileSync, chmodSync, rmSync, renameSync, openSync, fsyncSync, closeSync } = fs;\n${body}\nreturn ${name};`)(
     fs, sha, join, dirname, randomUUID, stageDir, database, open, ledgerStaleCodingRelease) as (r: object) => string;
 }
 
@@ -213,5 +213,29 @@ test('the coding database goes back with orders.db, and what it held is kept asi
     migrate();
     restore({ backup: backupFile, backupSha256: sha(backupFile) });
     expect([version(database), version(coding)]).toEqual([3, 4]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a coding database the stopped service left without a backup is left alone, not deleted', () => {
+  // Review of build #2256: no coding backup was recorded as "no coding database", so restore deleted one that existed.
+  const dir = mkdtempSync(join(tmpdir(), 'deploy-before-swap-')), database = join(dir, 'orders.db'), coding = `${database}.coding.sqlite`;
+  const backupFile = join(dir, 'orders.backup.db');
+  const sha = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
+  try {
+    const db = new DatabaseSync(backupFile);
+    db.exec('CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES(3)');
+    db.close();
+    copyFileSync(backupFile, database);
+    const beforeSwap = backupRestore(dir, database, 'codingBackupBeforeSwap') as (r: object) => string | null | undefined;
+    const restore = backupRestore(dir, database);
+    // No coding database before the swap: one found at restore was the candidate's.
+    expect(beforeSwap({})).toBeNull();
+    expect(beforeSwap({ codingBackupHash: 'a'.repeat(64) })).toBe('a'.repeat(64));
+    fs.writeFileSync(coding, 'coding store the stopped service left');
+    expect(beforeSwap({})).toBeUndefined();
+    const r = { backup: backupFile, backupSha256: sha(backupFile), codingBackupBeforeSwap: beforeSwap({}) };
+    const kept = restore(JSON.parse(JSON.stringify(r)));
+    expect(readFileSync(coding, 'utf8')).toBe('coding store the stopped service left');
+    expect(fs.existsSync(`${kept}.coding.sqlite`)).toBe(false);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
