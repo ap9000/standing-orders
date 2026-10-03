@@ -1141,7 +1141,7 @@ describe("the onboarding ceremony over real HTTP, and root-mode placement proofs
     // password, and size check all still stand behind that form.
     expect(page).toContain('value="alex/not-yet"');
     expect(page).toContain("Clone here");
-    expect(page).toContain("private");
+    expect(page).toContain(`<span class="badge">Private</span>`);
     // No cookie session, no listing.
     const anon = await fetch(url("/projects/github"), { redirect: "manual" });
     expect(anon.status).not.toBe(200);
