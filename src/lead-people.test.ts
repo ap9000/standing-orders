@@ -95,7 +95,7 @@ describe("the lead knows you and the people you work with", () => {
       const replacingBody = call(ctx, "remember", { kind: "about-you", text: "Copy for the store can be playful.", replaces: 1 });
       replacing = Number(replacingBody["proposal"]);
       expect(replacingBody["replaces"]).toEqual({ line: 1, was: "Keep copy terse." });
-      named = Number(call(ctx, "remember", { kind: "about-you", text: "Run the full checks for me.", replaces: 2 })["proposal"]);
+      named = Number(call(ctx, "remember", { kind: "about-you", text: "Copy can be long.", replaces: 1 })["proposal"]);
       expect(executeMateTool(ctx, "remember", { kind: "about-you", text: "Something", replaces: 9 })).toMatchObject({ ok: false });
     });
     expect(store.getMateProposal(added)!.payload).toMatchObject({ title: "Remember about you", terms: ["Write copy in full sentences, not terse notes.", expect.any(String)] });
@@ -103,10 +103,31 @@ describe("the lead knows you and the people you work with", () => {
       terms: ["Was: Keep copy terse.", "Now: Copy for the store can be playful.", expect.any(String)] });
     expect(confirmMateProposal(store, who, replacing, at(1), { via: "web", evidenceRoot: root })).toMatchObject({ ok: true });
     expect(store.leadAbout(who.name)).toEqual(["Copy for the store can be playful.", "I test changes myself."]);
-    // Cards drafted against the note before it changed are refused, not applied to the wrong line.
+    // A card replacing a line that changed since is refused, not applied to the wrong line; an added line still saves.
     expect(confirmMateProposal(store, who, named, at(2), { via: "web", evidenceRoot: root })).toMatchObject({ ok: false, reason: "stale" });
-    expect(confirmMateProposal(store, who, added, at(2), { via: "web", evidenceRoot: root })).toMatchObject({ ok: false, reason: "stale" });
-    expect(store.leadAbout(who.name)).toHaveLength(2);
+    expect(confirmMateProposal(store, who, added, at(2), { via: "web", evidenceRoot: root })).toMatchObject({ ok: true });
+    expect(store.leadAbout(who.name)).toEqual(["Copy for the store can be playful.", "I test changes myself.", "Write copy in full sentences, not terse notes."]);
+  });
+
+  test("c1: an about-you card that only adds is never stale; two preferences stated in one turn both save", () => {
+    saveAboutYou(store, who.name, ["Keep copy terse.", "I test changes myself."], t0);
+    let first = 0, second = 0, replacing = 0;
+    turn(t0, ctx => {
+      first = Number(call(ctx, "remember", { kind: "about-you", text: "Don't ping me for releases." })["proposal"]);
+      second = Number(call(ctx, "remember", { kind: "about-you", text: "I review on my phone." })["proposal"]);
+      replacing = Number(call(ctx, "remember", { kind: "about-you", text: "Run the full checks for me.", replaces: 2 })["proposal"]);
+    });
+    expect(confirmMateProposal(store, who, first, at(1), { via: "web", evidenceRoot: root })).toMatchObject({ ok: true, said: "Your lead will remember this." });
+    expect(confirmMateProposal(store, who, second, at(2), { via: "web", evidenceRoot: root })).toMatchObject({ ok: true, said: "Your lead will remember this." });
+    // Added lines go on the end, so the line a replacing card names is still the line it showed.
+    expect(confirmMateProposal(store, who, replacing, at(3), { via: "web", evidenceRoot: root })).toMatchObject({ ok: true, said: "Updated what your lead knows about you." });
+    expect(store.leadAbout(who.name)).toEqual(["Keep copy terse.", "Run the full checks for me.", "Don't ping me for releases.", "I review on my phone."]);
+    // An edit in Settings → Lead between drafting and confirming doesn't stop an added line either.
+    let third = 0;
+    turn(at(4), ctx => { third = Number(call(ctx, "remember", { kind: "about-you", text: "Mornings are best." })["proposal"]); });
+    saveAboutYou(store, who.name, ["Keep copy terse."], at(5));
+    expect(confirmMateProposal(store, who, third, at(6), { via: "web", evidenceRoot: root })).toMatchObject({ ok: true });
+    expect(store.leadAbout(who.name)).toEqual(["Keep copy terse.", "Mornings are best."]);
   });
 
   test("c1: an older lead_config gains the note on open; its name and persona carry over", () => {

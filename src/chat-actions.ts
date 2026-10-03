@@ -342,7 +342,9 @@ export function prepareSharedAction(
     const terms = replaces === 0
       ? [checked.line, "Your lead keeps this about you in every project. Change it in Settings → Lead."]
       : [`Was: ${lines[replaces - 1]}`, `Now: ${checked.line}`, "Replaces that line in what your lead knows about you. Change it in Settings → Lead."];
-    const state = { lines };
+    // An added line goes on the end, so it holds whatever else changed; a replacing card holds only while the line
+    // it replaces is still that line.
+    const state = replaces === 0 ? {} : { was: lines[replaces - 1] };
     const title = replaces === 0 ? "Remember about you" : "Update what your lead knows about you";
     const stamp = hash({ operation, request, repo: "", state, terms, actor: who.name, generation: who.generation, ceiling: who.ceilingDigest });
     return { operation, request, repo: "", title, terms, stamp, state };
@@ -1162,7 +1164,7 @@ export function executeSharedAction(
         actor = who.name;
       let taskId = task;
       if (payload.operation === "lead_about_you") {
-        const next = withAboutYouLine(payload.state["lines"] as string[], String(req["line"]), Number(req["replaces"] ?? 0));
+        const next = withAboutYouLine(aboutYouOf(store, actor), String(req["line"]), Number(req["replaces"] ?? 0));
         if (!next.ok) throw Error(next.message);
         saveAboutYou(store, actor, next.lines, now);
         return { ok: true as const, taskId: null, said: req["replaces"] === undefined ? "Your lead will remember this." : "Updated what your lead knows about you.", href: "/settings/lead" };
