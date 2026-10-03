@@ -263,6 +263,31 @@ CREATE TABLE IF NOT EXISTS project_mute (
   PRIMARY KEY (account, repo)
 );
 `;
+/** What the lead promised to follow up on (lead-commitments.ts; no version bump: additive only, so a build that
+ * predates it still opens the store). `condition_json` is a task, attempt, check or time; `check_at` is when to look
+ * next; `channel` is where it reports (`chat`: the conversation it was promised in); a promise lapses at `expires_at`. */
+export const LEAD_COMMITMENT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS lead_commitment (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner          TEXT NOT NULL,
+  repo           TEXT,
+  thread         INTEGER NOT NULL,
+  turn           INTEGER,
+  channel        TEXT NOT NULL DEFAULT 'chat',
+  what           TEXT NOT NULL,
+  condition_json TEXT NOT NULL,
+  check_at       TEXT NOT NULL,
+  expires_at     TEXT NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'done', 'cancelled', 'expired')),
+  created_at     TEXT NOT NULL,
+  checked_at     TEXT,
+  closed_at      TEXT,
+  closed_by      TEXT,
+  outcome        TEXT
+);
+CREATE INDEX IF NOT EXISTS lead_commitment_due ON lead_commitment (state, check_at);
+CREATE INDEX IF NOT EXISTS lead_commitment_owner ON lead_commitment (owner, state, id);
+`;
 /** What still pings on the lead's own work: a security alert. */
 const SECURITY_KINDS = new Set(["secret-detected", "security-release"]);
 /** A failure that leaves nothing for the lead to try: the attempts are spent. */
@@ -5131,6 +5156,7 @@ function initializeStore(db: Database, file: string): Store {
   // The update a batch line speaks for: its newest fact about that task (null: a finished result).
   addColumn(db, "chat_batch_item", "notification", "INTEGER");
   db.exec(LEAD_QUIET_SCHEMA);
+  db.exec(LEAD_COMMITMENT_SCHEMA);
   mergeCheckTables(db);
   addColumn(db, "monitoring_status", "target", "TEXT");
   // v105: how a teammate's turn was billed (this computer's Claude sign-in, as last seen).

@@ -233,7 +233,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   store.sweepStaleMateTurns(now);
 
   const view = mateViewContextFor(store, who);
-  const document = redactForMate(leadContext(store, who.repos, now, input.evidenceRoot), view);
+  const document = redactForMate(leadContext(store, who.repos, now, input.evidenceRoot, { owner: who.name, thread: thread.id }), view);
   const authoredMessage = input.queuedMessageId === undefined ? message : `From ${who.name}:\n${message}`;
   const historyMessage = input.context === undefined ? authoredMessage : `${redactForMate(input.context, view)}\n\n${authoredMessage}`;
   const history: MateHistoryMessage[] = [...historyFor(store, thread.id, input.queuedMessageId), { role: "operator", text: historyMessage }];
@@ -474,7 +474,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
         if (changed !== null) return changed;
       }
       progress({ kind: "tool", turn: turnId, step: steps, label: mateToolLabel(call.name) });
-      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
+      const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, thread: thread.id, turn: turnId, ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
       // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back (its start), keys
       // blanked. Each line stays whole JSON so a run can assert on what a tool returned rather than on the model's words.

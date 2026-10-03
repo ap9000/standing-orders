@@ -451,6 +451,25 @@ describe("fleet chat — the LLM drafts, the ceremony approves (v13)", () => {
     }
   });
 
+  test("Settings → Lead lists the lead's open promises, and the owner cancels one", async () => {
+    await boot();
+    const cookie = await login();
+    const thread = store.openMateThread("alex", "ceiling", T0).thread.id;
+    const { recordCommitment, getCommitment } = await import("./lead-commitments.js");
+    const made = recordCommitment(store, { owner: "alex", repo: null, thread, turn: null, what: "Tell you when the release check passes",
+      condition: { kind: "time", at: new Date(T0.getTime() + 3_600_000).toISOString() } }, T0);
+    let html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    expect(html).toContain("<h2>Promises</h2>");
+    expect(html).toContain("Tell you when the release check passes");
+    const csrf = /name="csrf" value="([0-9a-f]{64})"/.exec(html)?.[1] as string;
+    const cancelled = await fetch(url("/settings/lead/promise/cancel"), { method: "POST", headers: { cookie, origin: base },
+      body: new URLSearchParams({ csrf, promise: String(made.id) }), redirect: "manual" });
+    expect(cancelled.status).toBe(303);
+    expect(getCommitment(store, made.id)).toMatchObject({ state: "cancelled", closedBy: "alex" });
+    html = await (await fetch(url("/settings/lead"), { headers: { cookie } })).text();
+    expect(html).not.toContain("<h2>Promises</h2>");
+  });
+
   test("bearer callers are refused — drafts have nowhere to live", async () => {
     await boot();
     const bearer = await fetch(url("/chat"), { headers: { authorization: `Bearer alex:${approverToken}` } });

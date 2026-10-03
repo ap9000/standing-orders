@@ -125,7 +125,7 @@ describe("the mate's turn", () => {
     });
 
   test("the intake contract treats one outcome as enough and asks only material questions", () => {
-    expect(MATE_CONTRACT_VERSION).toBe(43);
+    expect(MATE_CONTRACT_VERSION).toBe(44);
     expect(MATE_CONTRACT).toContain("propose_flow create with a template or the steps in plain names");
     expect(MATE_CONTRACT).toContain("Ready is a saved result, not a reviewer stage");
     expect(MATE_CONTRACT).toContain("Historical missing assessments never require rerunning work");
@@ -139,6 +139,8 @@ describe("the mate's turn", () => {
     expect(MATE_CONTRACT).toContain("Do not ask the operator for a title, paths, implementation details, acceptance wording, model, budget");
     expect(MATE_CONTRACT).toContain("use your judgment");
     expect(MATE_CONTRACT).toContain("Set propose_task planning to 'required'");
+    expect(MATE_CONTRACT).toContain("call commit_to in the same turn");
+    expect(MATE_CONTRACT).toContain("call remember at once");
   });
 
   test("the organisation policy stops a chat on a provider or model it doesn't allow, before anything is admitted or sent", async () => {

@@ -101,15 +101,19 @@ export function assignmentCatchUp(store: Store, now: Date, access: AssignmentAcc
       else result.omissions.decisions += Math.max(0, count - decisions.length);
     }
     // Project knowledge is admitted in SQL before any payload or title read.
-    const projectRows = store.handle.prepare(`SELECT repo FROM project_knowledge WHERE ? = 1 OR repo IN (SELECT value FROM json_each(?)) ORDER BY repo LIMIT 9`)
+    // A project with settled decisions but no saved instructions yet still has knowledge to bring.
+    const known = store.handle.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_decision'").get() === undefined ? "SELECT repo FROM project_knowledge"
+      : "SELECT repo FROM project_knowledge UNION SELECT repo FROM project_decision WHERE status='active'";
+    const projectRows = store.handle.prepare(`SELECT repo FROM (${known}) WHERE ? = 1 OR repo IN (SELECT value FROM json_each(?)) ORDER BY repo LIMIT 9`)
       .all(repos === null ? 1 : 0, JSON.stringify(repos ?? []));
-    const projectCount = Number(store.handle.prepare('SELECT COUNT(*) AS n FROM project_knowledge WHERE ? = 1 OR repo IN (SELECT value FROM json_each(?))').get(repos === null ? 1 : 0, JSON.stringify(repos ?? []))?.["n"] ?? 0);
+    const projectCount = Number(store.handle.prepare(`SELECT COUNT(*) AS n FROM (${known}) WHERE ? = 1 OR repo IN (SELECT value FROM json_each(?))`).get(repos === null ? 1 : 0, JSON.stringify(repos ?? []))?.["n"] ?? 0);
     result.omissions.projects = Math.max(0, projectCount - 8);
     for (const project of projectRows.slice(0, 8)) {
       const repo = String(project["repo"]);
       const knowledge: AssignmentCatchUp["projects"][number]["knowledge"] = { status: "unavailable", revision: null, identity: null, sha256: null, instructions: "", sources: [], decisions: [] };
-      const row = store.handle.prepare('SELECT * FROM project_knowledge WHERE repo=?').get(repo)!;
-      try {
+      const row = store.handle.prepare('SELECT * FROM project_knowledge WHERE repo=?').get(repo);
+      if (row === undefined) knowledge.status = "none";
+      else try {
         const payload = String(row["payload"]), revision = Number(row["revision"]), identity = String(row["identity"]);
         const history = store.handle.prepare('SELECT sha FROM knowledge_change WHERE repo=? AND identity=? AND revision=?').get(repo, identity, revision);
         if (Buffer.byteLength(payload) > 160_000 || !Number.isSafeInteger(revision) || revision < 1 || sha(payload) !== row["sha"] || history?.["sha"] !== row["sha"]) throw Error("invalid stored context");
