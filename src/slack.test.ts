@@ -1220,7 +1220,6 @@ describe("Slack shared chat", () => {
     await drain();
     const second = askPart();
     const unit = buttonsOf(sends().at(-1)!)[0]!.value!;
-    const turns = (runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
     // A tap under a binding whose person is not the one the lead asked is ignored: nothing said, nothing used up.
     const binding = state.bindingFor(ID.installation, MEMBER)!;
     state.enqueue({ id: "other-approver-tap", installation: ID.installation, binding: binding.id, kind: "action", channel: CHANNEL, member: MEMBER, ts: String(second.message), thread: THREAD, payload: "{}", created: now.toISOString() });
@@ -1228,19 +1227,44 @@ describe("Slack shared chat", () => {
     expect(state.db.prepare("SELECT COUNT(*) AS n FROM slack_part WHERE event='other-approver-tap'").get()!.n).toBe(0);
     expect(state.event("other-approver-tap")!.state).toBe("done");
     expect(chatAskButtons(state, Number(second.id), now)).toHaveLength(3);
+    // Answered by typing within the day: a tap repaints the question once, without its buttons, under its own time.
+    const created = String(state.db.prepare("SELECT created FROM slack_part WHERE id=?").get(Number(second.id))!.created);
+    answers.push({ text: "Unit first, then." });
+    expect(receive("Unit", { ts: "1789700000.000202", thread_ts: THREAD })).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    const asking = (runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+    let sent = sends().length;
+    await press(unit, String(second.message));
+    expect(sends().slice(sent)).toMatchObject([{ method: "chat.update", args: { ts: String(second.message), text: expect.stringContaining("This question was already answered.") } }]);
+    expect(buttonsOf(sends().at(-1)!)).toEqual([]);
+    expect(state.db.prepare("SELECT created FROM slack_part WHERE id=?").get(Number(second.id))!.created).toBe(created);
+    // A later tap (a stale card) edits nothing more and posts nothing.
+    sent = sends().length;
+    await press(unit, String(second.message));
+    expect(sends().slice(sent)).toEqual([]);
+    expect((runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(asking);
+    // A question left past its time is too old to edit: the first tap says it expired once, in the thread; later taps say nothing.
+    answers.push(
+      { text: "", calls: [{ id: "q3", name: "ask_owner", args: { question: "Which browser first?", options: ["Safari", "Chrome"] } }] },
+      { text: "Pick one." },
+    );
+    expect(receive("Add browser tests", { ts: "1789700000.000203" })).toBe(true);
+    await processSlackEvent(options);
+    await drain();
+    const third = askPart();
+    const safari = buttonsOf(sends().at(-1)!)[0]!.value!;
+    const before = (runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
     now = new Date(now.getTime() + MATE_ASK_TTL_MS);
     state.lease(ID.installation, "test", now);
-    await press(unit, String(second.message));
-    // The question itself is repainted without its buttons, so a later tap has nothing to press and posts nothing.
-    const expiredCard = sends().at(-1)!;
-    expect(expiredCard).toMatchObject({ method: "chat.update", args: { ts: String(second.message), text: expect.stringContaining("This question expired. If it still matters, send your answer as a message.") } });
-    expect(buttonsOf(expiredCard)).toEqual([]);
-    const sent = sends().length;
-    await press(unit, String(second.message));
-    expect(sends().slice(sent).filter(one => one.method === "chat.postMessage")).toEqual([]);
-    expect(sends().slice(sent).every(one => !String(one.args.text).endsWith("send your answer as a message.\n\nThis question expired. If it still matters, send your answer as a message."))).toBe(true);
+    sent = sends().length;
+    await press(safari, String(third.message));
+    expect(sends().slice(sent)).toMatchObject([{ method: "chat.postMessage", args: { text: "This question expired. If it still matters, send your answer as a message.", thread_ts: THREAD } }]);
+    sent = sends().length;
+    await press(safari, String(third.message));
+    expect(sends().slice(sent)).toEqual([]);
     await processSlackEvent(options);
-    expect((runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(turns);
+    expect((runner as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(before);
     // Deleting a part (and the turn) is never blocked by its buttons.
     expect(Number(state.db.prepare("SELECT COUNT(*) AS n FROM slack_ask_action WHERE part=?").get(Number(second.id))!.n)).toBe(3);
     state.db.prepare("DELETE FROM slack_part WHERE id=?").run(Number(second.id));

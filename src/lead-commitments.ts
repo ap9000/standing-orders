@@ -110,12 +110,12 @@ export function getCommitment(store: Store, id: number): Commitment | null {
   return row === undefined ? null : readCommitment(row);
 }
 
-/** The reply that made a promise was shown: it was answered, or its text reached the conversation before the turn was
- * interrupted. */
-const SHOWN = (turn: string) => `(EXISTS (SELECT 1 FROM mate_turn t WHERE t.id = ${turn} AND t.state = 'answered')
-  OR EXISTS (SELECT 1 FROM mate_message m WHERE m.turn = ${turn} AND m.role = 'assistant'))`;
+/** The reply that made a promise was shown: its turn is over, and it was answered or its text reached the conversation
+ * before it failed. A turn still running has shown nothing yet, whatever it has written so far. */
+const SHOWN = (turn: string) => `EXISTS (SELECT 1 FROM mate_turn t WHERE t.id = ${turn} AND (t.state = 'answered'
+  OR t.state = 'failed' AND EXISTS (SELECT 1 FROM mate_message m WHERE m.turn = t.id AND m.role = 'assistant')))`;
 /** A promise only counts once the reply that made it was shown: one from a reply still being written, or one that
- * never reached the owner, was never heard. */
+ * failed without reaching the owner, was never heard. */
 const HEARD = `(c.turn IS NULL OR ${SHOWN('c.turn')})`;
 
 /** The owner's open promises that they heard, oldest first. */

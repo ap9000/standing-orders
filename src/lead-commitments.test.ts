@@ -302,6 +302,22 @@ describe("the lead keeps its promises and remembers corrections", () => {
     expect(openCommitments(store, "operator")).toMatchObject([{ what: "Tell you at one" }]);
   });
 
+  test("c1: a reply still running is not listed even once it has written text; failing without showing it drops its promise", async () => {
+    const running = turn(t0, ctx => { call(ctx, "commit_to", { what: "Tell you at one", when: "time", at: at(0.2).toISOString() }); }, "running");
+    store.appendMateMessage({ thread, turn: running, role: "assistant", text: "Partial reply" }, t0);
+    expect(openCommitments(store, "operator")).toEqual([]);
+    await pass(at(0.5));
+    expect(store.handle.prepare("SELECT state FROM lead_commitment").get()).toMatchObject({ state: "open" });
+    expect(said()).toEqual([]);
+    store.handle.prepare("DELETE FROM mate_message WHERE turn = ?").run(running);
+    const live = store.getMateTurn(running)!;
+    store.finalizeMateTurn(running, live.generation, { state: "failed", settledMicrousd: 0, unknownSpend: false, tokensIn: 0, tokensOut: 0, failureReason: "provider-error" }, at(0.6));
+    expect(openCommitments(store, "operator")).toEqual([]);
+    await pass(at(0.7));
+    expect(store.handle.prepare("SELECT state FROM lead_commitment").get()).toMatchObject({ state: "cancelled" });
+    expect(said()).toEqual([]);
+  });
+
   test("c2: a confirmed correction stays in the bundle after a promise report or follow update; only the lead's next reply clears it", async () => {
     let card = 0;
     turn(t0, ctx => {

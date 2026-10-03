@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { MATE_ASK_TTL_MS, openStore, type Store } from "./store.js";
+import { LEAD_FOLLOW_MESSAGE, MATE_ASK_TTL_MS, openStore, type Store } from "./store.js";
 import { sweepRetention } from "./retention.js";
 import { fileTaskProposal } from "./proposal.js";
 import { verifyApproverStanding, type VerifiedApprover } from "./principal.js";
@@ -159,15 +159,19 @@ describe("the lead checks before it speaks", () => {
     expect(store.mateAsk(first)).not.toBeNull();
     const failed = turn(false);
     expect(store.mateAsk(failed)).toBeNull();
-    // Answered stays answered once the answering message is removed (as retention does): the later turn shows it.
+    // A turn the lead started itself (automatic crew updates) is no answer; only the owner's own reply is.
     const asked = turn(true);
     const at = new Date(T0.getTime() + 60_000);
     const opened = store.openMateTurn({ approver: "alex", session: session.id, thread: thread.id, credentialKey: "k", reservedMicrousd: 10, dailyTurns: 50, weeklyCeilingMicrousd: 25_000_000, deadlineMs: 60_000 }, at);
     if (!opened.ok) throw new Error(opened.reason);
-    const answer = store.appendMateMessage({ thread: thread.id, turn: opened.id, role: "operator", text: "Signup" }, at);
+    store.appendMateMessage({ thread: thread.id, turn: opened.id, role: "operator", text: LEAD_FOLLOW_MESSAGE }, at);
+    expect(store.mateAskState(asked, at).state).toBe("open");
+    const answer = store.appendMateMessage({ thread: thread.id, turn: null, role: "operator", text: "Signup" }, at);
     expect(store.mateAskState(asked, at).state).toBe("answered");
-    store.handle.prepare("DELETE FROM mate_message WHERE id = ?").run(answer);
-    expect(store.mateAskState(asked, at).state).toBe("answered");
+    // Once retention removed the reply that asked and the answer, the question reads expired, never open again.
+    const asking = Number(store.handle.prepare("SELECT MAX(id) AS id FROM mate_message WHERE turn = ? AND role = 'assistant'").get(asked)!["id"]);
+    store.handle.prepare("DELETE FROM mate_message WHERE id IN (?, ?)").run(asking, answer);
+    expect(store.mateAskState(asked, at).state).toBe("expired");
   });
 
   test("c2: a question is open, then answered or expired; its rows never block a purge of the turn or the reply", () => {

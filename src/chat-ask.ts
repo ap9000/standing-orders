@@ -35,12 +35,22 @@ export function chatAskButtons(state: ChatState, part: number, now: Date): Array
     .filter((one): one is { token: string; label: string; words: boolean } => one !== null);
 }
 
-/** Show the question again with what happened, and without its buttons (an edit now, however old the question). */
+/** How old a part may be and still be sent: older ones are dropped undelivered (slack-chat.ts, discord-chat.ts,
+ * teams-chat.ts), so an edit to one would never land. */
+const EDIT_WINDOW_MS = 86_400_000;
+
+/** Show the question again with what happened, and without its buttons: one edit, under the part's own time. A question
+ * too old to edit gets the line once as a new message instead. */
 function repaint(state: ChatState, part: number, event: ChatEvent, line: string, now: Date): void {
-  const row = state.prepare("SELECT payload FROM chat_part WHERE id=?").get(part);
-  const before = row === undefined ? { text: "" } : JSON.parse(String(row["payload"])) as ChatContent;
-  const content: ChatContent = { text: before.text.endsWith(`\n\n${line}`) ? before.text : `${before.text}\n\n${line}`.slice(0, 3400), edit: event.ts, ...(before.channel === undefined ? {} : { channel: before.channel }) };
-  state.prepare("UPDATE chat_part SET payload=?,state='pending',created=?,next_at=NULL WHERE id=?").run(JSON.stringify(content), now.toISOString(), part);
+  const row = state.prepare("SELECT payload,created FROM chat_part WHERE id=?").get(part);
+  if (row === undefined || new Date(String(row["created"])).getTime() + EDIT_WINDOW_MS <= now.getTime()) {
+    state.plan(event.id, [{ text: line }], now);
+    return;
+  }
+  const before = JSON.parse(String(row["payload"])) as ChatContent;
+  const content: ChatContent = { text: `${before.text}\n\n${line}`.slice(0, 3400), edit: event.ts, ...(before.channel === undefined ? {} : { channel: before.channel }) };
+  state.prepare("UPDATE chat_part SET payload=?,state='pending',next_at=NULL WHERE id=?").run(JSON.stringify(content), part);
+  state.finish(event.id);
 }
 
 /** A tapped ask button, inside the action's transaction; false when the token isn't one. */
@@ -63,12 +73,15 @@ export function applyChatAskTap(options: { store: Store; state: ChatState }, eve
   }
   const found = asker === undefined ? { state: "expired" as const } : store.mateAskState(turn, now);
   const expired = found.state === "expired" || String(action["expires"]) <= now.toISOString();
-  if (action["consumed"] !== null || found.state !== "open" || expired) {
-    state.prepare("UPDATE chat_ask_action SET consumed=? WHERE part=? AND consumed IS NULL").run(now.toISOString(), part);
-    // Either way the question is shown again without its buttons, so a later tap has nothing to press.
-    repaint(state, part, event, found.state === "answered" || (action["consumed"] !== null && !expired)
-      ? "This question was already answered." : "This question expired. If it still matters, send your answer as a message.", now);
+  // A question already settled was shown so once (or is being): a later tap says nothing more.
+  if (action["consumed"] !== null) {
     state.finish(event.id);
+    return true;
+  }
+  if (found.state !== "open" || expired) {
+    state.prepare("UPDATE chat_ask_action SET consumed=? WHERE part=? AND consumed IS NULL").run(now.toISOString(), part);
+    // The question is shown again without its buttons, so a later tap has nothing to press.
+    repaint(state, part, event, found.state === "answered" ? "This question was already answered." : "This question expired. If it still matters, send your answer as a message.", now);
     return true;
   }
   const ask = found.ask;
@@ -86,6 +99,5 @@ export function applyChatAskTap(options: { store: Store; state: ChatState }, eve
     payload: JSON.stringify({ text: option, originalLength: option.length }), created: now.toISOString(),
   });
   repaint(state, part, event, `You chose: ${option}`, now);
-  state.finish(event.id);
   return true;
 }
