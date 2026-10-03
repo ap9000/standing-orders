@@ -225,26 +225,45 @@ function recoverJournal() {
 process.on("exit", code => { if (code !== 0) recoverJournal(); });
 exitOnSignals();
 const alive = pid => spawnSync("/bin/ps", ["-p", String(pid), "-o", "pid="], { encoding: "utf8" }).status !== 1;
-/** Interrupted while the old service was stopping: every process recorded for it is gone and launchd no longer has it. */
+/** Interrupted while the old service was stopping: every process recorded for it is gone and launchd no longer has it.
+ * A journal may hold only one of the two service records; the absent one adds no pid. */
 function stopProved(r) {
-  const pids = [...new Set([r.oldService?.supervisor, ...(r.oldService?.children ?? []), r.stoppingService?.supervisor, ...(r.stoppingService?.children ?? [])])];
+  const pids = [...new Set([r.oldService?.supervisor, ...(r.oldService?.children ?? []), r.stoppingService?.supervisor, ...(r.stoppingService?.children ?? [])])]
+    .filter(pid => pid !== undefined && pid !== null);
   return pids.length > 0 && pids.every(pid => Number.isInteger(pid) && pid > 1 && !alive(pid)) &&
     spawnSync("/bin/launchctl", ["print", `gui/${uid}/${label}`], { encoding: "utf8" }).status !== 0;
 }
-/** The verified backup, taken before the swap, in place of a live database the candidate migrated. The live files
- * are copied aside first (nothing is running to write them), so nothing written since is lost. Returns that copy. */
+/** The verified backups, taken before the swap, in place of a live database the candidate migrated and its coding
+ * database. Both backups are checked before either is touched. The live files are copied aside first (nothing is running
+ * to write them), so nothing written since is lost. Returns the copy of orders.db; the coding copy sits beside it. */
 function restoreDeploymentBackup(r) {
   if (!existsSync(r.backup) || sha(readFileSync(r.backup)) !== r.backupSha256) throw Error(`the verified backup ${r.backup} is missing or changed; the migrated database was left as it is`);
-  const kept = join(stageDir, `orders.kept.${randomUUID().slice(0, 8)}.db`);
-  for (const suffix of ["", "-wal"]) if (existsSync(database + suffix)) { copyFileSync(database + suffix, kept + suffix); chmodSync(kept + suffix, 0o600); fsyncFile(kept + suffix); }
-  const temp = `${database}.${randomUUID()}.restore`;
-  try {
-    copyFileSync(r.backup, temp); chmodSync(temp, 0o600); fsyncFile(temp);
-    for (const suffix of ["-wal", "-shm"]) rmSync(database + suffix, { force: true });
-    renameSync(temp, database); fsyncFile(dirname(database));
-  } finally { rmSync(temp, { force: true }); }
-  // The backup predates a stale coding owner this deployment released; the ledger keeps saying so.
-  if (r.codingOwnerReleased) { const db = openDeploymentDatabase(database); try { ledgerStaleCodingRelease(db, r.codingOwnerReleased); } finally { db.close(); } }
+  // The coding database as the stopped service left it: its verified backup, or none at all (null). A journal
+  // written before this was recorded uses whatever coding backup it holds, and without one leaves the coding files alone.
+  const coding = `${database}.coding.sqlite`;
+  const codingHash = r.codingBackupBeforeSwap !== undefined ? r.codingBackupBeforeSwap : r.codingBackupHash;
+  if (typeof codingHash === "string") {
+    const stat = r.codingBackupPath === join(stageDir, "coding.backup.sqlite") && existsSync(r.codingBackupPath) ? lstatSync(r.codingBackupPath) : null;
+    if (!stat?.isFile() || stat.isSymbolicLink() || sha(readFileSync(r.codingBackupPath)) !== codingHash) throw Error(`the verified coding backup ${r.codingBackupPath} is missing or changed; the migrated databases were left as they are`);
+  }
+  const id = randomUUID().slice(0, 8), kept = join(stageDir, `orders.kept.${id}.db`), keptCoding = join(stageDir, `orders.kept.${id}.db.coding.sqlite`);
+  for (const [live, aside] of [[database, kept], ...(codingHash === undefined ? [] : [[coding, keptCoding]])]) {
+    for (const suffix of ["", "-wal"]) if (existsSync(live + suffix)) { copyFileSync(live + suffix, aside + suffix); chmodSync(aside + suffix, 0o600); fsyncFile(aside + suffix); }
+  }
+  const put = (backupFile, live) => {
+    const temp = `${live}.${randomUUID()}.restore`;
+    try {
+      copyFileSync(backupFile, temp); chmodSync(temp, 0o600); fsyncFile(temp);
+      for (const suffix of ["-wal", "-shm"]) rmSync(live + suffix, { force: true });
+      renameSync(temp, live); fsyncFile(dirname(live));
+    } finally { rmSync(temp, { force: true }); }
+  };
+  put(r.backup, database);
+  // A coding database the stopped service never had was the candidate's; it is kept aside, not left for the previous runtime.
+  if (typeof codingHash === "string") put(r.codingBackupPath, coding);
+  else if (codingHash === null) { for (const suffix of ["", "-wal", "-shm"]) rmSync(coding + suffix, { force: true }); fsyncFile(dirname(coding)); }
+  // The backup predates a stale coding owner this deployment released; the ledger keeps saying so, dated when it happened.
+  if (r.codingOwnerReleased) { const db = openDeploymentDatabase(database); try { ledgerStaleCodingRelease(db, r.codingOwnerReleased, r.codingOwnerReleasedAt); } finally { db.close(); } }
   return kept;
 }
 function fsyncFile(path) { const fd = openSync(path, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } }
@@ -443,6 +462,8 @@ async function swap() {
   const oldPids = [...new Set([r.oldService.supervisor, ...r.oldService.children, r.stoppingService.supervisor, ...r.stoppingService.children])];
   await verifyServiceStopped(oldPids);
   await ensureCodingBackup(oldRt.coding, r);
+  // The coding database as the stopped service left it; a failed deployment puts this back with orders.db.
+  r.codingBackupBeforeSwap = r.codingBackupHash ?? null;
   save(r, "stopped");
   // An older runtime killed before its close left its coding owner record behind: with every old
   // process proved gone, the candidate's own check releases it (ledgered) instead of failing here.

@@ -119,7 +119,7 @@ function backupRestore(stageDir: string, database: string) {
   const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
   const open = (file: string, options = {}) => new DatabaseSync(file, options);
   return new Function('fs', 'sha', 'join', 'dirname', 'randomUUID', 'stageDir', 'database', 'openDeploymentDatabase', 'ledgerStaleCodingRelease',
-    `const { existsSync, readFileSync, copyFileSync, chmodSync, rmSync, renameSync, openSync, fsyncSync, closeSync } = fs;\n${body}\nreturn restoreDeploymentBackup;`)(
+    `const { existsSync, lstatSync, readFileSync, copyFileSync, chmodSync, rmSync, renameSync, openSync, fsyncSync, closeSync } = fs;\n${body}\nreturn restoreDeploymentBackup;`)(
     fs, sha, join, dirname, randomUUID, stageDir, database, open, ledgerStaleCodingRelease) as (r: object) => string;
 }
 
@@ -134,7 +134,7 @@ test('a migrated database is replaced by the verified backup, and what it held i
     const live = new DatabaseSync(database);
     live.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; UPDATE schema_version SET version=8; CREATE TABLE added(x)");
     const restore = backupRestore(dir, database);
-    const r = { backup: backupFile, backupSha256: createHash('sha256').update(readFileSync(backupFile)).digest('hex'), codingOwnerReleased: { pid: 4242, nativePid: null } };
+    const r = { backup: backupFile, backupSha256: createHash('sha256').update(readFileSync(backupFile)).digest('hex'), codingOwnerReleased: { pid: 4242, nativePid: null }, codingOwnerReleasedAt: '2026-10-02T09:15:00.000Z' };
     expect(() => restore({ ...r, backupSha256: '0'.repeat(64) })).toThrow('missing or changed');
     // A changed backup puts nothing back: the migrated database, its WAL included, is as it was.
     expect(live.prepare('SELECT version FROM schema_version').get()?.version).toBe(8);
@@ -145,10 +145,73 @@ test('a migrated database is replaced by the verified backup, and what it held i
     const restored = new DatabaseSync(database, { readOnly: true });
     expect(restored.prepare('SELECT version FROM schema_version').get()?.version).toBe(7);
     // The backup predates the stale-owner release, so the release is ledgered again.
-    expect(restored.prepare('SELECT detail FROM action_ledger').get()?.detail).toMatch(/process 4242 proved gone/);
+    // Dated when the deployment released it, not when the backup went back.
+    expect(restored.prepare('SELECT at, detail FROM action_ledger').get()).toEqual({ at: '2026-10-02T09:15:00.000Z', detail: expect.stringMatching(/process 4242 proved gone/) });
     restored.close();
     const aside = new DatabaseSync(kept, { readOnly: true });
     expect(aside.prepare('SELECT version FROM schema_version').get()?.version).toBe(8);
     aside.close();
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+/** deploy-browser's exact stop proof, with the processes still running and launchd's answer supplied. */
+function stopProof(running: number[], launchdHasLabel: boolean) {
+  const source = readFileSync(resolve('scripts/deploy-browser.mjs'), 'utf8');
+  const body = source.slice(source.indexOf('function stopProved('), source.indexOf('/** The verified backups, taken before the swap'));
+  const spawnSync = () => ({ status: launchdHasLabel ? 0 : 113 });
+  return new Function('alive', 'spawnSync', 'uid', 'label', `${body}\nreturn stopProved;`)(
+    (pid: number) => running.includes(pid), spawnSync, 501, 'com.toolroll.browser') as (r: object) => boolean;
+}
+
+test('a stop is proved from whichever service record the journal holds, never from none', () => {
+  // Review of build #2234: a journal with only one record put undefined in the pid set and never proved the stop.
+  const old = { oldService: { supervisor: 4100, children: [4101] } };
+  const stopping = { stoppingService: { supervisor: 4200, children: [4201] } };
+  for (const r of [old, stopping, { ...old, ...stopping }]) {
+    expect(stopProof([], false)(r)).toBe(true);
+    // A recorded process still running, or launchd still holding the label, is not a proved stop.
+    expect(stopProof([4101, 4201], false)(r)).toBe(false);
+    expect(stopProof([], true)(r)).toBe(false);
+  }
+  expect(stopProof([], false)({})).toBe(false);
+  expect(stopProof([], false)({ oldService: { children: [] } })).toBe(false);
+  // A recorded pid that is not a real process id still refuses.
+  expect(stopProof([], false)({ oldService: { supervisor: 1, children: [] } })).toBe(false);
+  expect(stopProof([], false)({ oldService: { supervisor: '4100', children: [] } })).toBe(false);
+});
+
+test('the coding database goes back with orders.db, and what it held is kept aside with it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'deploy-restore-coding-')), database = join(dir, 'orders.db'), coding = `${database}.coding.sqlite`;
+  const backupFile = join(dir, 'orders.backup.db'), codingBackup = join(dir, 'coding.backup.sqlite');
+  const sha = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
+  const version = (file: string) => { const db = new DatabaseSync(file, { readOnly: true }); try { return db.prepare('SELECT version FROM schema_version').get()?.version; } finally { db.close(); } };
+  try {
+    for (const file of [backupFile, codingBackup]) {
+      const db = new DatabaseSync(file);
+      db.exec('CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES(3)');
+      db.close();
+    }
+    const migrate = () => {
+      copyFileSync(backupFile, database); copyFileSync(codingBackup, coding);
+      for (const file of [database, coding]) { const db = new DatabaseSync(file); db.exec('UPDATE schema_version SET version=4'); db.close(); }
+    };
+    migrate();
+    const restore = backupRestore(dir, database);
+    const r = { backup: backupFile, backupSha256: sha(backupFile), codingBackupPath: codingBackup, codingBackupHash: sha(codingBackup), codingBackupBeforeSwap: sha(codingBackup) };
+    // A changed coding backup puts neither database back.
+    expect(() => restore({ ...r, codingBackupBeforeSwap: '0'.repeat(64) })).toThrow('coding backup');
+    expect([version(database), version(coding)]).toEqual([4, 4]);
+    const kept = restore(r);
+    expect([version(database), version(coding)]).toEqual([3, 3]);
+    expect([version(kept), version(`${kept}.coding.sqlite`)]).toEqual([4, 4]);
+    // A coding database the stopped service never had was the candidate's: it is kept aside, not left in place.
+    migrate();
+    const fresh = restore({ ...r, codingBackupBeforeSwap: null });
+    expect(fs.existsSync(coding)).toBe(false);
+    expect(version(`${fresh}.coding.sqlite`)).toBe(4);
+    // A journal from before this was recorded and without a coding backup leaves the coding files alone.
+    migrate();
+    restore({ backup: backupFile, backupSha256: sha(backupFile) });
+    expect([version(database), version(coding)]).toEqual([3, 4]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
