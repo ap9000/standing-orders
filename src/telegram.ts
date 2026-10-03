@@ -28,7 +28,8 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateNote } from "./decision.js";
-import { isLifecycleNotification, isTelegramProgressNotification, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
+import { resultShotsFor, type ResultShot } from "./result-shots.js";
+import { isLifecycleNotification, isTelegramProgressNotification, RESULT_SHOTS_KIND, TELEGRAM_HOLD_REASONS, type Store, type Decision, type Notification, type TelegramBinding, type TelegramDelivery } from "./store.js";
 import { telegramProgressCard, type ProgressEntity } from "./telegram-progress.js";
 import { enqueueEveningDigests, finishedView, isTaskFact, joinsBatch, needsPerson, quietCardView, type QuietView } from "./chat-quiet.js";
 import { BATCH_MS, chatText, chatTitle, factLinkLabel, mentions, nameTelegramBot } from "./chat-voice.js";
@@ -195,6 +196,8 @@ export type TelegramTransport = (
   signal?: AbortSignal,
   /** v64: one verified file to send as multipart — the ONLY way bytes leave. Absent, the call is JSON exactly as before. */
   upload?: TelegramUpload,
+  /** More verified files in the same multipart call: the rest of one album (sendMediaGroup). */
+  more?: readonly TelegramUpload[],
 ) => Promise<{ ok: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number }; uncertain?: boolean }>;
 
 /**
@@ -204,10 +207,10 @@ export type TelegramTransport = (
  * Telegram never fetches anything for us, and nothing on this machine is
  * uploaded by name.
  */
-export type TelegramUpload = { field: "document"; fileName: string; contentType: "image/png" | "image/jpeg"; bytes: Buffer };
+export type TelegramUpload = { field: "document" | "photo" | `shot${number}`; fileName: string; contentType: "image/png" | "image/jpeg"; bytes: Buffer };
 
 export function createTransport(token: string, timeoutMs = 30_000): TelegramTransport {
-  return async (method, params, signal, upload) => {
+  return async (method, params, signal, upload, more) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onAbort = () => controller.abort();
@@ -222,7 +225,7 @@ export function createTransport(token: string, timeoutMs = 30_000): TelegramTran
       // the verified bytes as one Blob under the file name given.
       const request: RequestInit = upload === undefined
         ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params), signal: controller.signal }
-        : { method: "POST", body: multipartOf(params, upload), signal: controller.signal };
+        : { method: "POST", body: multipartOf(params, upload, ...(more ?? [])), signal: controller.signal };
       const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, request);
       const body = (await response.json()) as { ok?: boolean; result?: unknown; description?: string; parameters?: { retry_after?: number } } | null;
       // A missing or malformed acknowledgement does not prove a send failed.
@@ -288,13 +291,13 @@ export function transportError(error: unknown): string {
 }
 
 /** The multipart body: every param a field (objects as JSON), the file last. Exported for the adapter's own test only. */
-export function multipartOf(params: Record<string, unknown>, upload: TelegramUpload): FormData {
+export function multipartOf(params: Record<string, unknown>, upload: TelegramUpload, ...more: readonly TelegramUpload[]): FormData {
   const form = new FormData();
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null) continue;
     form.append(key, typeof value === "object" ? JSON.stringify(value) : String(value));
   }
-  form.append(upload.field, new Blob([new Uint8Array(upload.bytes)], { type: upload.contentType }), upload.fileName);
+  for (const one of [upload, ...more]) form.append(one.field, new Blob([new Uint8Array(one.bytes)], { type: one.contentType }), one.fileName);
   return form;
 }
 
@@ -758,7 +761,7 @@ async function deliverOutbox(
     // Routine progress facts are not a problem to fix: a first pairing
     // starts from now and settles them as history. Anything else pending
     // is named, once per pass, as before.
-    if (store.listNotifications("pending").some(row => !isLifecycleNotification(row))) report.problems.push("outbox rows are pending but no chat is paired — `toolroll bridge telegram pair`");
+    if (store.listNotifications("pending").some(row => !isLifecycleNotification(row) && row.kind !== RESULT_SHOTS_KIND)) report.problems.push("outbox rows are pending but no chat is paired — `toolroll bridge telegram pair`");
     return;
   }
   const digest = store.telegramDigest();
@@ -878,6 +881,49 @@ async function deliverOutboxTo(
       store.recordTelegramMessage(row, binding, String(messageId), clock());
       const after = (await readAccess()) ?? fence();
       return after === null ? { ok: true, receipt: receiptFor(botId, binding.chatId, String(messageId)) } : { ok: false, error: after };
+    };
+    /** Screenshots with a result (result-shots.ts): photos, several as one album, re-proved before every call. Each is
+     * marked sent before it goes, so an unconfirmed send is never repeated; only Telegram's outright refusal unmarks it. */
+    const shotsSender = async (row: TelegramDelivery): Promise<{ ok: true; receipt: string | null } | { ok: false; error: string }> => {
+      let receipt: string | null = null;
+      for (let call = 0; call <= 4; call++) {
+        const problem = (await readAccess()) ?? fence();
+        if (problem !== null) return { ok: false, error: problem };
+        const plan = resultShotsFor(store, evidenceRoot, telegramConversationRepos(store, binding.approver, projects), row, store.resultShotsSent(row.destination, row.run ?? 0));
+        if (plan.kind === "none") return call > 0 ? { ok: true, receipt } : { ok: true, receipt: `skipped:screenshots-${plan.why}` };
+        if (plan.kind === "line") {
+          const sent = await sender(plan.text, undefined, [row]);
+          return sent.ok ? { ok: true, receipt: receiptFor(botId, binding.chatId, sent.messageId) } : sent;
+        }
+        // No await between the access fence, the files' verification and the upload.
+        const photos = plan.shots.filter(one => one.photo);
+        const batch: ResultShot[] = photos.length >= 2 ? photos : [plan.shots[0]!];
+        const upload = (one: ResultShot, field: TelegramUpload["field"]): TelegramUpload =>
+          ({ field, fileName: one.fileName, contentType: one.format === "png" ? "image/png" : "image/jpeg", bytes: one.bytes });
+        const ids = batch.map(one => one.artifact);
+        store.markResultShotsSent(row.destination, plan.run, ids, clock());
+        let answer: Awaited<ReturnType<TelegramTransport>>;
+        try {
+          answer = batch.length > 1
+            ? await transport("sendMediaGroup", { chat_id: binding.chatId, media: batch.map((one, index) => ({ type: "photo", media: `attach://shot${index}`, ...(index === 0 ? { caption: one.caption } : {}) })) },
+              undefined, upload(batch[0]!, "shot0"), batch.slice(1).map((one, index) => upload(one, `shot${index + 1}`)))
+            : batch[0]!.photo
+              ? await transport("sendPhoto", { chat_id: binding.chatId, caption: batch[0]!.caption }, undefined, upload(batch[0]!, "photo"))
+              : await transport("sendDocument", { chat_id: binding.chatId, caption: batch[0]!.caption }, undefined, upload(batch[0]!, "document"));
+        } catch { answer = { ok: false, uncertain: true }; }
+        if (!answer.ok && answer.uncertain !== true) {
+          store.unmarkResultShotsSent(row.destination, plan.run, ids);
+          if (answer.parameters?.retry_after !== undefined) store.deferTelegram(botId, new Date(clock().getTime() + answer.parameters.retry_after * 1000).toISOString());
+          return { ok: false, error: "Telegram did not accept the screenshots" };
+        }
+        const messages = (Array.isArray(answer.result) ? answer.result : [answer.result])
+          .map(one => (one as { message_id?: number } | undefined)?.message_id).filter((one): one is number => Number.isSafeInteger(one));
+        // An unconfirmed send stays marked: it may have arrived, so it is never sent again.
+        if (!answer.ok || messages.length === 0) report.problems.push(`notification ${row.id}: Telegram did not confirm the screenshots; they are not sent again`);
+        for (const one of messages) store.recordTelegramMessage(row, binding, String(one), clock());
+        receipt = receiptFor(botId, binding.chatId, messages.length === 0 ? null : String(messages[0]));
+      }
+      return { ok: true, receipt };
     };
     const batched = !quiet && digest.everyMs !== null && !isUrgent(rows[0]!);
     const row = rows[0]!;
@@ -1041,7 +1087,8 @@ async function deliverOutboxTo(
       return sent.ok ? { ok: true, receipt: receiptFor(botId, binding.chatId, sent.messageId) } : sent;
     };
     let outcome: { ok: true; receipt: string | null } | { ok: false; error: string };
-    if (rows.length === 1 && row.kind === LEAD_SAY_KIND) outcome = await leadSayOutcome(row);
+    if (rows.length === 1 && row.kind === RESULT_SHOTS_KIND) outcome = await shotsSender(row);
+    else if (rows.length === 1 && row.kind === LEAD_SAY_KIND) outcome = await leadSayOutcome(row);
     else if (quiet && rows.length === 1 && isTaskFact(row)) outcome = await quietOutcome(row);
     else {
       // A failure or decision still gets its own alert. Refresh an existing
@@ -1075,7 +1122,8 @@ async function deliverOutboxTo(
 
 /** What pages singly whatever the cadence: a decision, or an attention-class fact. */
 function isUrgent(notification: Notification): boolean {
-  return /^decision:\d+$/.test(notification.dedupeKey) || notification.pushClass === "attention" || notification.kind === "acceptance-evidence" || notification.kind === "acceptance-ready";
+  return /^decision:\d+$/.test(notification.dedupeKey) || notification.pushClass === "attention" || notification.kind === "acceptance-evidence" || notification.kind === "acceptance-ready"
+    || notification.kind === RESULT_SHOTS_KIND;
 }
 
 /** The digest text: a header with the count and the window, then one
