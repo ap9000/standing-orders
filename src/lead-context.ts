@@ -13,7 +13,7 @@ import { publicChatText } from './chat-display.js';
 import { leadIdentityOf } from './lead-identity.js';
 import { conditionWords, openCommitments } from './lead-commitments.js';
 import { aboutYouOf } from './lead-about.js';
-import { peopleIndexOf, peopleLines } from './lead-people.js';
+import { peopleIndexOf, peopleLines, teamRoomOf } from './lead-people.js';
 
 const REMEMBERED = new Set(['decision_record', 'knowledge_instructions', 'lead_about_you']);
 /** The lead's own follow-through for one conversation: its open promises, and corrections the operator confirmed
@@ -129,10 +129,12 @@ export function leadContext(store: Store, repos: readonly string[], now: Date, o
   const omissions = { ...brief.omissions, projects: Math.max(brief.omissions.projects, repos.length - 8), notes: [...brief.omissions.notes] };
   const firstName = options.owner === undefined ? null : firstNameOf(options.owner);
   const redact = options.redact ?? (text => text);
-  // A team chat's own lead speaks for the room, so the owner's own note stays with their own lead.
-  const aboutYou = options.leadName === undefined ? aboutYouOf(store, options.owner) : [];
+  // A team chat's own lead speaks for the room, so the owner's own note stays with their own lead, and the people
+  // index is that room and its members, no one else.
+  const room = teamRoomOf(store, options.thread);
+  const aboutYou = options.leadName === undefined && room === null ? aboutYouOf(store, options.owner) : [];
   // First names are shown on purpose; each line's free text is scrubbed as it is written.
-  const people = options.owner === undefined ? { people: [], teammates: [], teams: [] } : peopleLines(peopleIndexOf(store, options.owner, repos), redact);
+  const people = options.owner === undefined ? { people: [], teammates: [], teams: [] } : peopleLines(peopleIndexOf(store, options.owner, repos, room), redact);
   // The whole bundle is scrubbed (titles, notes, next labels, the lead's name and persona); then the names it
   // carries on purpose are put back: the lead's own name, the person's first name, the lines they confirmed about
   // themselves, the people index (first names) and each project's label.

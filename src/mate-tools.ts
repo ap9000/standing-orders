@@ -97,8 +97,8 @@ import { deskOf, routinesOf } from "./teammate-desk.js";
 import { KITS } from "./kits.js";
 import { STARTER_IDS } from "./flow-starters.js";
 import { undoFor, weekOf, weekWords } from "./teammate-week.js";
-import { personEntry } from "./lead-people.js";
-import { aboutYouOf, checkAboutYouLine, overlappingLine } from "./lead-about.js";
+import { PERSON_ID, personEntry, teamRoomOf } from "./lead-people.js";
+import { aboutYouOf, checkAboutYouLine } from "./lead-about.js";
 
 const REPO_ID = /^r[0-9]{1,3}$/;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -1233,9 +1233,9 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "remember",
-    description: "When the operator corrects you or states a lasting preference ('don't run full checks on this project'), propose it at once as a card: kind decision (a settled choice with its reason) or instruction (added to the project's standing instructions; pass the instructions revision from your catch-up, 0 when it has none). kind about-you is about the owner themselves in every project ('keep copy terse', 'I test myself', 'don't ping me for releases'): text is one line under 200 characters, no repo; when it changes or contradicts a line in your catch-up's aboutYou, pass replaces with that line's number (1 is the first). A line on the same subject is replaced unless keepBoth is true. Only what they said, never a guess. Once confirmed it is in your next turn's catch-up.",
+    description: "When the operator corrects you or states a lasting preference ('don't run full checks on this project'), propose it at once as a card: kind decision (a settled choice with its reason) or instruction (added to the project's standing instructions; pass the instructions revision from your catch-up, 0 when it has none). kind about-you is about the owner themselves in every project ('keep copy terse', 'I test myself', 'don't ping me for releases'): text is one line under 200 characters, no repo; when it changes or contradicts a line in your catch-up's aboutYou, pass replaces with that line's number (1 is the first): the card shows both and replaces it; without replaces the line is added. Only what they said, never a guess. Once confirmed it is in your next turn's catch-up.",
     inputSchema: schema({ repo: REPO_ARG, kind: { type: "string", enum: ["decision", "instruction", "about-you"] }, text: { type: "string", minLength: 3, maxLength: 240 }, why: { type: "string", maxLength: 2000 }, source: { type: "string", maxLength: 200 },
-      revision: { type: "integer", minimum: 0 }, replaces: { type: "integer", minimum: 1, maximum: 20 }, keepBoth: { type: "boolean" } }, ["kind", "text"]),
+      revision: { type: "integer", minimum: 0 }, replaces: { type: "integer", minimum: 1, maximum: 20 } }, ["kind", "text"]),
     handle: (ctx, args) => {
       if (args["kind"] === "about-you") return rememberAboutYou(ctx, args);
       const repo = repoPathOf(ctx.who, args["repo"]);
@@ -1276,13 +1276,14 @@ export const MATE_TOOLS: MateTool[] = [
   },
   {
     name: "get_person",
-    description: "One person, AI teammate or team chat from your catch-up's people index, in full, with their open tasks: id (p2, t5, c1) or name. Read it before answering a question about that person, teammate or team. Read-only.",
-    inputSchema: schema({ id: { type: "string", pattern: "^[ptc][0-9]{1,9}$" }, name: { type: "string", minLength: 1, maxLength: 80 } }),
+    description: "One person, AI teammate or team chat from your catch-up's people index, in full, with their open tasks: its id as the index shows it (p3fa91c2e, t5, c07b1d9a4) or a name. Read it before answering a question about that person, teammate or team. Read-only.",
+    inputSchema: schema({ id: { type: "string", pattern: PERSON_ID.source }, name: { type: "string", minLength: 1, maxLength: 80 } }),
     handle: (ctx, args) => {
-      const id = typeof args["id"] === "string" && /^[ptc][0-9]{1,9}$/.test(args["id"]) ? args["id"] : undefined;
+      const id = typeof args["id"] === "string" && PERSON_ID.test(args["id"]) ? args["id"] : undefined;
       const name = typeof args["name"] === "string" && args["name"].trim() !== "" ? args["name"] : undefined;
-      if (id === undefined && name === undefined) return { ok: false, message: "Give an id from your catch-up's people index (p2, t5, c1) or a name." };
-      const found = personEntry(ctx.store, ctx.who.name, ctx.who.repos, { ...(id === undefined ? {} : { id }), ...(name === undefined ? {} : { name }) });
+      if (id === undefined && name === undefined) return { ok: false, message: "Give an id from your catch-up's people index or a name." };
+      // In a team chat, the same people the room's catch-up lists: that room and its members.
+      const found = personEntry(ctx.store, ctx.who.name, ctx.who.repos, { ...(id === undefined ? {} : { id }), ...(name === undefined ? {} : { name }) }, teamRoomOf(ctx.store, ctx.thread));
       if (found === null) return { ok: false, message: "No one by that name or id works with you. Your catch-up's people index lists who does." };
       return { ok: true, body: "several" in found ? { several: found.several, next: "Ask which one, or call get_person with an id." } : { person: found.found } };
     },
@@ -1890,18 +1891,18 @@ function memoryUnsearched(ctx: MateToolContext, name: string, args: Record<strin
     : "This project has recorded decisions. Search them with search_project_memory first, then propose in a later step, citing any decision you rely on." };
 }
 
-/** remember about-you: a card for one line about the owner, beside the line it replaces. A line on the same subject is
- * replaced by default (the card shows both); keepBoth adds it as a new line instead. */
+/** remember about-you: a card for one line about the owner. It replaces a line only when the lead names it with
+ * replaces, and then the card shows both; otherwise the line is added. */
 function rememberAboutYou(ctx: MateToolContext, args: Record<string, unknown>): MateToolResult {
   const checked = checkAboutYouLine(args["text"]);
   if (!checked.ok || !honest(args["text"], 240)) return { ok: false, message: checked.ok ? "Say it in one plain line." : checked.message };
   // A shared team chat's lead speaks for the room; what the owner's own lead knows about them is theirs.
-  if (ctx.thread !== undefined && ctx.store.handle.prepare("SELECT 1 FROM team_conversation WHERE thread = ?").get(ctx.thread) !== undefined)
+  if (teamRoomOf(ctx.store, ctx.thread) !== null)
     return { ok: false, message: "What your lead knows about someone is kept in their own chat with it, not a team chat." };
   const lines = aboutYouOf(ctx.store, ctx.who.name);
   if (args["replaces"] !== undefined && (!Number.isSafeInteger(args["replaces"]) || Number(args["replaces"]) < 1 || Number(args["replaces"]) > lines.length))
     return { ok: false, message: `replaces is a line number from your catch-up's aboutYou (1 to ${lines.length}).` };
-  const replaces = args["replaces"] !== undefined ? Number(args["replaces"]) : args["keepBoth"] === true ? 0 : overlappingLine(lines, checked.line);
+  const replaces = args["replaces"] !== undefined ? Number(args["replaces"]) : 0;
   const waiting = ctx.thread === undefined ? [] : ctx.store.listMateProposals(ctx.thread, ["drafting", "pending", "confirming"])
     .filter(one => one.kind === "action" && one.payload["operation"] === "lead_about_you");
   const twin = waiting.find(one => String((one.payload["request"] as Record<string, unknown> | undefined)?.["line"] ?? "").toLowerCase() === checked.line.toLowerCase());
@@ -1911,7 +1912,7 @@ function rememberAboutYou(ctx: MateToolContext, args: Record<string, unknown>): 
   catch (error) { return { ok: false, message: error instanceof Error ? error.message : "That card could not be prepared." }; }
   const id = ctx.draft("action", { ...action });
   return id === null ? tooMany() : { ok: true, body: { proposal: id, label: action.title, awaiting: "confirmation", executed: false,
-    ...(replaces === 0 ? {} : { replaces: { line: replaces, was: lines[replaces - 1] }, keepBoth: "If they want both kept, propose again with keepBoth true." }),
+    ...(replaces === 0 ? {} : { replaces: { line: replaces, was: lines[replaces - 1] } }),
     next: "Once confirmed it is in your next catch-up's aboutYou." } };
 }
 

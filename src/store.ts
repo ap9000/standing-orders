@@ -26705,9 +26705,10 @@ export class Store {
 
   // ---- pings follow responsibility: the lead, who acted, replacements and muted projects ----
 
-  /** What this person named their lead and its persona, or null when they never saved one. */
+  /** What this person named their lead and its persona, or null when they never saved one. An empty name or persona
+   * (a row saved only for what the lead knows about them) reads as the default. */
   leadConfig(account: string): { name: string; persona: string } | null {
-    const row = this.db.prepare("SELECT name, persona FROM lead_config WHERE account = ?").get(account);
+    const row = this.db.prepare("SELECT name, persona FROM lead_config WHERE account = ? AND (name <> '' OR persona <> '')").get(account);
     return row === undefined ? null : { name: String(row["name"]), persona: String(row["persona"]) };
   }
 
@@ -26728,10 +26729,10 @@ export class Store {
   }
 
   /** Save what this person's lead knows about them (checked by the caller: lead-about.ts). A person who never named
-   * their lead keeps the default name and persona. */
-  setLeadAbout(account: string, lines: readonly string[], defaults: { name: string; persona: string }, now: Date): void {
-    this.db.prepare(`INSERT INTO lead_config (account, name, persona, updated_at, about_json) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(account) DO UPDATE SET about_json = excluded.about_json, updated_at = excluded.updated_at`).run(account, defaults.name, defaults.persona, now.toISOString(), JSON.stringify(lines));
+   * their lead gets an empty name and persona, so they keep following the defaults. */
+  setLeadAbout(account: string, lines: readonly string[], now: Date): void {
+    this.db.prepare(`INSERT INTO lead_config (account, name, persona, updated_at, about_json) VALUES (?, '', '', ?, ?)
+      ON CONFLICT(account) DO UPDATE SET about_json = excluded.about_json, updated_at = excluded.updated_at`).run(account, now.toISOString(), JSON.stringify(lines));
   }
 
   /** A lead token for one person, shown once. A new one ends their earlier ones; the ledger names it "lead for <owner>". */

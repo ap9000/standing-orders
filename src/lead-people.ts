@@ -1,7 +1,10 @@
 /** Who the lead works with: the people on this installation who share a project with its owner, the AI teammates in
  * those projects, and the team chats the owner is in. The bundle carries one line each (lead-context.ts); get_person
- * reads one in full, with their open work. Ids are p1.., t<teammate>, c1.., in a stable order. Only the owner's own
- * projects are listed, by their r1.. ids; first names are shown on purpose, everything else is scrubbed by the caller. */
+ * reads one in full, with their open work. Ids stay the same from turn to turn however the list changes: p and c plus a
+ * short digest of the account or team chat, t plus the teammate's number. In a team chat the lead speaks for the room,
+ * so only that room and its members are listed. Only the owner's own projects are listed, by their r1.. ids; first
+ * names are shown on purpose, everything else is scrubbed by the caller. */
+import { createHash } from "node:crypto";
 import type { Store, TeammateRow } from "./store.js";
 import { firstNameOf } from "./lead-context.js";
 import { labelOf, nameOf, zonesOf } from "./teammate-admin.js";
@@ -14,21 +17,35 @@ export type TeamEntry = { id: string; conversation: string; name: string; member
 export type PeopleIndex = { people: PersonEntry[]; teammates: MateEntry[]; teams: TeamEntry[] };
 
 const OPEN_TASK = new Set(["queued", "running", "failed"]);
+/** get_person's id shapes. */
+export const PERSON_ID = /^(p[0-9a-f]{8}|t[0-9]{1,9}|c[0-9a-f]{8})$/;
+const stableId = (prefix: "p" | "c", key: string) => `${prefix}${createHash("sha256").update(key).digest("hex").slice(0, 8)}`;
+
+/** The team chat this conversation is, or null when it is the person's own chat with their lead. */
+export function teamRoomOf(store: Store, thread: number | undefined): string | null {
+  if (thread === undefined) return null;
+  try {
+    const row = store.handle.prepare("SELECT id FROM team_conversation WHERE thread = ?").get(thread);
+    return row === undefined ? null : String(row["id"]);
+  } catch { return null; } // an older store has no team chats
+}
 const line = (text: string, max: number) => { const flat = text.replace(/\s+/g, " ").trim(); return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat; };
 
-/** Everyone the owner's lead works with, in order. */
-export function peopleIndexOf(store: Store, owner: string, repos: readonly string[]): PeopleIndex {
+/** Everyone the owner's lead works with, in order; in a team chat (`room`), only that room and its members. */
+export function peopleIndexOf(store: Store, owner: string, repos: readonly string[], room: string | null = null): PeopleIndex {
   const label = (repo: string) => { const index = repos.indexOf(repo); return index === -1 ? null : `r${index + 1}`; };
   const named = (list: readonly string[]) => list.map(label).filter((one): one is string => one !== null);
+  const inRoom = room === null ? null : new Set(store.handle.prepare("SELECT account FROM team_participant WHERE conversation = ? AND active = 1").all(room).map(one => String(one["account"])));
   const people = store.accountFacts()
-    .filter(one => one.name !== owner && one.revokedAt === null)
+    .filter(one => one.name !== owner && one.revokedAt === null && (inRoom === null || inRoom.has(one.name)))
     .map(one => ({ one, shared: one.projects === null ? [...repos] : repos.filter(repo => one.projects!.includes(repo)) }))
     .filter(({ shared }) => shared.length > 0)
-    .map(({ one, shared }, index) => ({ id: `p${index + 1}`, account: one.name, name: firstNameOf(one.name) || one.name,
+    .map(({ one, shared }) => ({ id: stableId("p", one.name), account: one.name, name: firstNameOf(one.name) || one.name,
       role: one.role === "approver" ? "approves work" : "watches work",
       // No person has a written profile yet; the field is there for when one does.
       projects: named(shared), profile: null }));
-  const teammates = store.teammates(repos).map(mate => {
+  // AI teammates are not members of a team chat.
+  const teammates = room !== null ? [] : store.teammates(repos).map(mate => {
     const soul = parseSoul(mate.soul);
     return { id: `t${mate.id}`, mate, name: nameOf(mate), role: soul.ok ? soul.soul.role : labelOf(mate), project: label(mate.repo) ?? "" };
   });
@@ -38,13 +55,13 @@ export function peopleIndexOf(store: Store, owner: string, repos: readonly strin
       WHERE EXISTS (SELECT 1 FROM team_participant p WHERE p.conversation = c.id AND p.account = ? AND p.active = 1)
          OR (c.visibility = 'team' AND EXISTS (SELECT 1 FROM team_lead_member m WHERE m.lead = c.lead AND m.account = ? AND m.active = 1))
       ORDER BY c.created_at, c.id`).all(owner, owner);
-    teams = rows.map((row, index) => {
+    teams = rows.filter(row => room === null || String(row["id"]) === room).map(row => {
       const members = store.handle.prepare("SELECT account FROM team_participant WHERE conversation = ? AND active = 1 ORDER BY account").all(row["id"])
         .map(one => String(one["account"])).map(account => account === owner ? "you" : firstNameOf(account) || account);
       let projects: string[] = [];
       try { const listed = JSON.parse(String(row["projects_json"])); if (Array.isArray(listed)) projects = named(listed.map(String)); } catch { /* none named */ }
       const purpose = String(row["instructions"] ?? "").split("\n").map(one => one.trim()).find(one => one !== "") ?? "";
-      return { id: `c${index + 1}`, conversation: String(row["id"]), name: String(row["title"]), members, purpose: purpose || String(row["lead"]), projects };
+      return { id: stableId("c", String(row["id"])), conversation: String(row["id"]), name: String(row["title"]), members, purpose: purpose || String(row["lead"]), projects };
     });
   } catch { /* an older store has no team chats */ }
   return { people, teammates, teams };
@@ -70,10 +87,11 @@ function openWorkOf(store: Store, account: string, repos: readonly string[]) {
   return { tasks, cards };
 }
 
-/** One entry in full by its id (p2, t5, c1) or by name; the candidates when a name fits several, null when none. */
-export function personEntry(store: Store, owner: string, repos: readonly string[], ask: { id?: string; name?: string }):
+/** One entry in full by its id (p3fa91c2e, t5, c07b1d9a4) or by name; the candidates when a name fits several, null when
+ * none. In a team chat (`room`), only that room and its members. */
+export function personEntry(store: Store, owner: string, repos: readonly string[], ask: { id?: string; name?: string }, room: string | null = null):
   { found: Record<string, unknown> } | { several: { id: string; name: string; kind: string }[] } | null {
-  const index = peopleIndexOf(store, owner, repos);
+  const index = peopleIndexOf(store, owner, repos, room);
   const wanted = ask.name?.trim().toLowerCase() ?? "";
   const all = [
     ...index.people.map(one => ({ id: one.id, name: one.name, kind: "person", also: one.account })),

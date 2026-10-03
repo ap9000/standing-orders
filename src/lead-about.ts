@@ -3,7 +3,6 @@
  * owner confirmed (a remember about-you card) or wrote themselves are kept, never a guess. */
 import type { Store } from "./store.js";
 import { scanForSecrets } from "./evidence.js";
-import { leadIdentityOf } from "./lead-identity.js";
 
 export const ABOUT_YOU_MAX_LINES = 20;
 /** Each line is under 200 characters. */
@@ -27,39 +26,20 @@ export function checkAboutYouLine(value: unknown): { ok: true; line: string } | 
 /** The Settings form's text, one line each: the saved list, or the problem with it. Blank lines and repeats go. */
 export function checkAboutYou(text: string): { ok: true; lines: string[] } | { ok: false; message: string } {
   const lines: string[] = [];
-  for (const raw of text.replace(/\r\n?/g, "\n").split("\n")) {
+  // A problem names the line as the person sees it in the box, blank lines and repeats counted.
+  for (const [index, raw] of text.replace(/\r\n?/g, "\n").split("\n").entries()) {
     if (raw.trim() === "") continue;
     const checked = checkAboutYouLine(raw);
-    if (!checked.ok) return { ok: false, message: `Line ${lines.length + 1}: ${checked.message}` };
+    if (!checked.ok) return { ok: false, message: `Line ${index + 1}: ${checked.message}` };
     if (!lines.some(one => one.toLowerCase() === checked.line.toLowerCase())) lines.push(checked.line);
   }
   if (lines.length > ABOUT_YOU_MAX_LINES) return { ok: false, message: `Keep it to ${ABOUT_YOU_MAX_LINES} lines.` };
   return { ok: true, lines };
 }
 
-/** Save the whole list for this person (already checked). */
+/** Save the whole list for this person (already checked). Their lead's name and persona are left as they are. */
 export function saveAboutYou(store: Store, account: string, lines: readonly string[], now: Date): void {
-  store.setLeadAbout(account, lines, leadIdentityOf(store, account), now);
-}
-
-const QUIET = new Set(["the", "and", "for", "with", "that", "this", "you", "your", "me", "my", "i", "a", "an", "to", "of", "on", "in", "at", "it", "is", "are", "be",
-  "do", "dont", "don't", "not", "never", "always", "please", "when", "about", "or", "by", "from", "so", "but", "any", "all", "just", "keep", "like", "prefer", "want", "id", "i'd"]);
-const wordsOf = (line: string) => new Set(line.toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(one => one.length > 2 && !QUIET.has(one)).map(one => one.replace(/(?:ing|es|s)$/, "")));
-
-/** The saved line a new one most likely updates (same subject, said differently), as its 1-based number; 0: none.
- * The lead names the line it replaces when it knows; this catches the ones it missed. */
-export function overlappingLine(lines: readonly string[], line: string): number {
-  const fresh = wordsOf(line);
-  if (fresh.size === 0) return 0;
-  let best = 0, score = 0;
-  lines.forEach((old, index) => {
-    const before = wordsOf(old);
-    if (before.size === 0) return;
-    const shared = [...fresh].filter(one => before.has(one)).length;
-    const share = shared / Math.min(fresh.size, before.size);
-    if (shared > 0 && share >= 0.5 && share > score) { best = index + 1; score = share; }
-  });
-  return best;
+  store.setLeadAbout(account, lines, now);
 }
 
 /** The list once a confirmed line is added, or once it replaces line `replaces` (1-based). */

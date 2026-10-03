@@ -14,9 +14,11 @@ import { fileTaskProposal } from "./proposal.js";
 import { confirmMateProposal } from "./mate-doors.js";
 import { executeMateTool, MATE_TOOL_SCHEMAS, type MateToolContext } from "./mate-tools.js";
 import { leadContext, LEAD_CONTEXT_MAX_BYTES } from "./lead-context.js";
-import { ABOUT_YOU_MAX_LINES, checkAboutYou, overlappingLine, saveAboutYou, withAboutYouLine } from "./lead-about.js";
+import { ABOUT_YOU_MAX_LINES, checkAboutYou, saveAboutYou, withAboutYouLine } from "./lead-about.js";
+import { DEFAULT_LEAD_NAME, DEFAULT_LEAD_PERSONA, leadIdentityOf } from "./lead-identity.js";
 import { MATE_CONTRACT } from "./mate-contract.js";
 import { TeamLeads } from "./team-leads.js";
+import { personEntry } from "./lead-people.js";
 import { withActor } from "./actor.js";
 
 describe("the lead knows you and the people you work with", () => {
@@ -73,31 +75,37 @@ describe("the lead knows you and the people you work with", () => {
 
     expect(confirmMateProposal(store, who, card, at(2), { via: "web", evidenceRoot: root })).toMatchObject({ ok: true, said: "Your lead will remember this." });
     expect(store.leadAbout(who.name)).toEqual(["Keep copy terse."]);
-    // Stored beside the lead's name and persona (the defaults, when never named).
-    expect(store.leadConfig(who.name)).toMatchObject({ name: "Lead" });
+    // Stored beside the lead's name and persona, which stay the defaults when never named: nothing frozen.
+    expect(store.leadConfig(who.name)).toBeNull();
+    expect(store.handle.prepare("SELECT name, persona FROM lead_config WHERE account = ?").get(who.name)).toEqual({ name: "", persona: "" });
+    expect(leadIdentityOf(store, who.name)).toEqual({ name: DEFAULT_LEAD_NAME, persona: DEFAULT_LEAD_PERSONA });
     const data = bundle(at(3));
     expect(data.aboutYou).toEqual(["Keep copy terse."]);
     expect(data.corrections).toEqual([{ proposal: card, change: "About you: Keep copy terse." }]);
   });
 
-  test("c1: a line that changes an old one shows both on the card and replaces it by default; keepBoth adds it instead", () => {
+  test("c1: a card replaces a line only when the lead names it; then it shows both, otherwise it adds", () => {
     saveAboutYou(store, who.name, ["Keep copy terse.", "I test changes myself."], t0);
-    let replacing = 0, both = 0, named = 0;
+    let added = 0, replacing = 0, named = 0;
     turn(t0, ctx => {
+      // A line on the same subject, not named: no guessing, it is added.
       const body = call(ctx, "remember", { kind: "about-you", text: "Write copy in full sentences, not terse notes." });
-      replacing = Number(body["proposal"]);
-      expect(body["replaces"]).toEqual({ line: 1, was: "Keep copy terse." });
-      both = Number(call(ctx, "remember", { kind: "about-you", text: "Copy for the store can be playful.", keepBoth: true })["proposal"]);
+      added = Number(body["proposal"]);
+      expect(body["replaces"]).toBeUndefined();
+      const replacingBody = call(ctx, "remember", { kind: "about-you", text: "Copy for the store can be playful.", replaces: 1 });
+      replacing = Number(replacingBody["proposal"]);
+      expect(replacingBody["replaces"]).toEqual({ line: 1, was: "Keep copy terse." });
       named = Number(call(ctx, "remember", { kind: "about-you", text: "Run the full checks for me.", replaces: 2 })["proposal"]);
       expect(executeMateTool(ctx, "remember", { kind: "about-you", text: "Something", replaces: 9 })).toMatchObject({ ok: false });
     });
+    expect(store.getMateProposal(added)!.payload).toMatchObject({ title: "Remember about you", terms: ["Write copy in full sentences, not terse notes.", expect.any(String)] });
     expect(store.getMateProposal(replacing)!.payload).toMatchObject({ title: "Update what your lead knows about you",
-      terms: ["Was: Keep copy terse.", "Now: Write copy in full sentences, not terse notes.", expect.any(String)] });
-    expect(store.getMateProposal(both)!.payload).toMatchObject({ title: "Remember about you" });
+      terms: ["Was: Keep copy terse.", "Now: Copy for the store can be playful.", expect.any(String)] });
     expect(confirmMateProposal(store, who, replacing, at(1), { via: "web", evidenceRoot: root })).toMatchObject({ ok: true });
-    expect(store.leadAbout(who.name)).toEqual(["Write copy in full sentences, not terse notes.", "I test changes myself."]);
+    expect(store.leadAbout(who.name)).toEqual(["Copy for the store can be playful.", "I test changes myself."]);
     // Cards drafted against the note before it changed are refused, not applied to the wrong line.
     expect(confirmMateProposal(store, who, named, at(2), { via: "web", evidenceRoot: root })).toMatchObject({ ok: false, reason: "stale" });
+    expect(confirmMateProposal(store, who, added, at(2), { via: "web", evidenceRoot: root })).toMatchObject({ ok: false, reason: "stale" });
     expect(store.leadAbout(who.name)).toHaveLength(2);
   });
 
@@ -110,6 +118,9 @@ describe("the lead knows you and the people you work with", () => {
     saveAboutYou(store, who.name, ["Keep copy terse."], t0);
     expect(store.leadConfig(who.name)).toEqual({ name: "Maya", persona: "Short." });
     expect(store.leadAbout(who.name)).toEqual(["Keep copy terse."]);
+    // Naming the lead later keeps the note.
+    store.setLeadConfig(who.name, "Rio", "Brief.", at(1));
+    expect(store.leadAbout(who.name)).toEqual(["Keep copy terse."]);
   });
 
   test("c1: the note is short — at most 20 lines, each under 200 characters — and a guess-free plain text", () => {
@@ -119,8 +130,9 @@ describe("the lead knows you and the people you work with", () => {
     const full = Array.from({ length: ABOUT_YOU_MAX_LINES }, (_, index) => `Preference number ${index}`);
     expect(withAboutYouLine(full, "One more thing", 0)).toMatchObject({ ok: false, message: expect.stringContaining("full") });
     expect(withAboutYouLine(full, "One more thing", 3)).toMatchObject({ ok: true });
-    expect(overlappingLine(["Don't ping me for releases."], "Ping me for every release.")).toBe(1);
-    expect(overlappingLine(["Don't ping me for releases."], "Keep copy terse.")).toBe(0);
+    // A problem names the line as the box shows it: blank lines and repeats count.
+    expect(checkAboutYou("Keep copy terse.\n\nkeep copy terse.\n" + "x".repeat(200))).toMatchObject({ ok: false, message: expect.stringMatching(/^Line 4: /) });
+    expect(checkAboutYou("\r\n\r\nx")).toMatchObject({ ok: false, message: expect.stringMatching(/^Line 3: /) });
   });
 
   test("c2: the bundle carries about-you lines right after who you are, then the people index, one line each", () => {
@@ -143,12 +155,32 @@ describe("the lead knows you and the people you work with", () => {
     expect(data.aboutYou).toEqual(["Keep copy terse."]);
     // Only people who share a project; their first names are shown on purpose, projects by the ids the bundle names.
     expect(data.people).toEqual({
-      people: ["p1 Jo: approves work; r2", "p2 Sam: approves work; r1, r2"],
+      people: [expect.stringMatching(/^p[0-9a-f]{8} Jo: approves work; r2$/), expect.stringMatching(/^p[0-9a-f]{8} Sam: approves work; r1, r2$/)],
       teammates: [expect.stringMatching(/^t\d+ Maya: Support \(r1\)$/)],
-      teams: ["c1 Spring launch: you, Sam; Get the spring launch out the door."],
+      teams: [expect.stringMatching(/^c[0-9a-f]{8} Spring launch: you, Sam; Get the spring launch out the door\.$/)],
     });
-    // A team chat's own lead speaks for the room: the owner's own note stays out of it.
-    expect(bundle(at(1), { leadName: "Launch lead" }).aboutYou).toEqual([]);
+    // Ids come from the account or team chat, not the list position: someone new ahead in the list moves no one.
+    const idOf = (one: string) => one.split(" ")[0];
+    store.saveApprover("abe", "h".repeat(64), t0);
+    const later = bundle(at(2)).people;
+    expect(later.people.map(idOf)).toHaveLength(3);
+    expect(later.people.find((one: string) => one.includes(" Jo:"))).toBe(data.people.people[0]);
+    expect(later.people.find((one: string) => one.includes(" Sam:"))).toBe(data.people.people[1]);
+    expect(later.teams).toEqual(data.people.teams);
+    expect(new Set(later.people.map(idOf)).size).toBe(3);
+
+    // A team chat's own lead speaks for the room: the owner's own note stays out, and the people index is that room
+    // and its members, no one else.
+    const roomThread = Number(store.handle.prepare("SELECT thread FROM team_conversation WHERE id = ?").get(conversationId)!["thread"]);
+    const room = bundle(at(3), { leadName: "Launch lead", thread: roomThread });
+    expect(room.aboutYou).toEqual([]);
+    expect(room.people).toEqual({ people: [data.people.people[1]], teammates: [], teams: data.people.teams });
+    // Even without the room's lead name, the room's own thread is enough.
+    expect(bundle(at(3), { thread: roomThread }).people.people).toEqual([data.people.people[1]]);
+    // get_person in the room looks up the same people.
+    expect(personEntry(store, who.name, who.repos, { name: "Jo" }, conversationId)).toBeNull();
+    expect(personEntry(store, who.name, who.repos, { name: "Maya" }, conversationId)).toBeNull();
+    expect(personEntry(store, who.name, who.repos, { name: "Sam" }, conversationId)).toMatchObject({ found: { kind: "person", name: "Sam" } });
   });
 
   test("c2: over 8 KB, people drop before projects' decisions; who you are and what the lead knows about you stay", () => {
@@ -189,12 +221,15 @@ describe("the lead knows you and the people you work with", () => {
     }
     expect(store.cancelTask("old-thing", t0, "Not needed")).toEqual({ ok: true });
     const mate = store.createTeammate({ repo: web, handle: "maya", soul: "---\nname: Maya\nrole: Support\n---\n## Who you are\nHelpful.\n", model: null, manager: who.name, by: who.name }, t0);
+    const samId = (bundle(at(1)).people.people[0] as string).split(" ")[0]!;
+    expect(samId).toMatch(/^p[0-9a-f]{8}$/);
     turn(at(1), ctx => {
-      const sam = call(ctx, "get_person", { id: "p1" })["person"] as Record<string, unknown>;
-      expect(sam).toMatchObject({ id: "p1", kind: "person", name: "Sam", role: "approves work", projects: ["r1", "r2"] });
+      const sam = call(ctx, "get_person", { id: samId })["person"] as Record<string, unknown>;
+      expect(sam).toMatchObject({ id: samId, kind: "person", name: "Sam", role: "approves work", projects: ["r1", "r2"] });
       // Open work only: the cancelled task is not listed.
       expect(sam["openTasks"]).toEqual([{ task: "login-page", title: "Fix the login page", state: "queued", repo: "r1" }]);
-      expect(call(ctx, "get_person", { name: "sam" })["person"]).toMatchObject({ id: "p1" });
+      expect(call(ctx, "get_person", { name: "sam" })["person"]).toMatchObject({ id: samId });
+      expect(executeMateTool(ctx, "get_person", { id: "p1" })).toMatchObject({ ok: false });
       expect(call(ctx, "get_person", { name: "Maya" })["person"]).toMatchObject({ id: `t${mate}`, kind: "AI teammate", name: "Maya", role: "Support", project: "r1", openTasks: [] });
       expect(executeMateTool(ctx, "get_person", { name: "Nobody" })).toMatchObject({ ok: false });
       expect(executeMateTool(ctx, "get_person", {})).toMatchObject({ ok: false });
