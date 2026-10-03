@@ -14,7 +14,9 @@ import {
   taskInCeiling,
   tooLongText,
 } from "./chat-channel.js";
-import { MATE_MESSAGE_MAX_CHARS, runMateTurn } from "./mate.js";
+import { MATE_MESSAGE_MAX_CHARS, mateFailureText, runMateTurn } from "./mate.js";
+import { shapeReply } from "./reply-shape.js";
+import { warmTurn, type WarmHooks } from "./chat-warmth.js";
 import {
   confirmMateProposal,
   dismissMateProposal,
@@ -67,6 +69,8 @@ export type ChatDeliveryOptions = {
   clock?: () => Date;
   partSize?: number;
   maxProposal?: number;
+  /** The app's warm touches for one owner message (a 👍, typing), where the app and the bot's permissions allow them. */
+  warm?: (event: ChatEvent, binding: ChatBinding) => WarmHooks;
 };
 const nowOf = (options: ChatDeliveryOptions) => options.clock?.() ?? new Date();
 export const splitChatText = (text: string, size = 2800): string[] => {
@@ -322,7 +326,7 @@ export async function processChatEvent(
       if (event.session !== null && event.session !== resolved.session.id) {
         state.plan(
           event.id,
-          [{ text: "Your chat session changed. Send your message again." }],
+          [{ text: "This conversation was restarted after you sent that, so it wasn't answered. Send your message again." }],
           now,
         );
         return true;
@@ -375,6 +379,9 @@ export async function processChatEvent(
       }
       // An unknown surface names no channel rather than a guess.
       const channel = leadChannelOf(options.label);
+      // Only ever the owner's own message in their own chat: never the bot's, never a room.
+      const warm = warmTurn(options.warm !== undefined && event.kind === "message" && event.member !== identity.bot && event.member === binding.member && event.channel === binding.channel
+        ? options.warm(event, binding) : {});
       const outcome = await runMateTurn({
         store,
         who: resolved.who,
@@ -394,6 +401,7 @@ export async function processChatEvent(
         evidenceRoot: options.evidenceRoot,
         mediaDelivery: "documents",
         ...(channel === undefined ? {} : { channel }),
+        onProgress: warm.onProgress,
         revalidate: async () => {
           try {
             await channelAccess(options, binding, resolved.who.ceilingDigest);
@@ -405,7 +413,7 @@ export async function processChatEvent(
             };
           }
         },
-      });
+      }).finally(warm.stop);
       if (outcome.ok && !outcome.replayed && context?.task)
         mirrorToTaskChat(store, resolved.who, context.task, options.label, text, outcome.reply, nowOf(options));
       if (
@@ -456,7 +464,7 @@ export async function processChatEvent(
         event.id,
         [
           {
-            text: "The assistant’s reply did not finish. No proposed changes were kept. Send your message again to retry.",
+            text: mateFailureText(turn?.failureReason ?? null),
           },
         ],
         nowOf(options),
@@ -476,8 +484,8 @@ export async function processChatEvent(
           (message) => message.turn === turn.id && message.role === "assistant",
         )?.text ?? "The reply is no longer in the saved thread.";
     // The lead's answer about one task names it: a reply to it stays on that task.
-    const parts: ChatContent[] = splitChatText(reply, options.partSize).map(
-      (text) => (about === null ? { text } : { text, task: about.task, ...(about.run === null ? {} : { run: about.run }) }),
+    const parts: ChatContent[] = splitChatText(shapeReply(reply, { asked: text, appOrigin: options.origin() }), options.partSize).map(
+      (text) => (about === null ? { text, voice: true } : { text, voice: true, task: about.task, ...(about.run === null ? {} : { run: about.run }) }),
     );
     // The lead's question to its owner: its options as buttons, then "Something else", in their own chat (any thread);
     // in a room a tap is not their message, so the question and its options go out as text.
@@ -748,7 +756,7 @@ export async function planRoomMessages(options: ChatDeliveryOptions): Promise<vo
       }
       if (carrier === null) break;
       const parts: ChatContent[] = [];
-      if (text !== null) parts.push({ text, channel: room.chat });
+      if (text !== null) parts.push(message.role === "assistant" ? { text: shapeReply(text, { appOrigin: options.origin() }), voice: true, channel: room.chat } : { text, channel: room.chat });
       if (message.role === "assistant" && message.turn !== null)
         for (const proposal of store.listMateProposals(row.thread, ["pending"]).filter(one => one.turn === message.turn)) parts.push({ text: "", proposal: proposal.id, channel: room.chat });
       const id = chatHash(`${state.channel}:room:${room.id}:${message.id}`);

@@ -7,6 +7,7 @@
  * per-chat cursor read on every bridge cycle. No model runs here.
  */
 import type { Store, TelegramBinding, TelegramTeamChat } from "./store.js";
+import { voiceReply } from "./reply-shape.js";
 import { TeamLeads } from "./team-leads.js";
 import type { TeamActor, TeamConversation } from "./team-contract.js";
 import { proposalPreview, tooLongText } from "./chat-channel.js";
@@ -261,7 +262,7 @@ export async function deliverTeamChats(
       const skip = role === "operator" && (ownMessage || status === "cancelled" || String(message["author"] ?? "").length === 0);
       const prefix = `telegram-team:${chat.id}:`;
       if (!skip) {
-        const text = role === "assistant" ? String(message["text"]) : `${phoneText(String(message["author"]), 40)}: ${String(message["text"])}`;
+        const text = role === "assistant" ? voiceReply(String(message["text"]), "telegram", { appOrigin: phoneOrigin?.() ?? null }) : `${phoneText(String(message["author"]), 40)}: ${String(message["text"])}`;
         const sent = await sendParts(store, transport, chat.chatId, text, `${prefix}message:${id}`, clock, access, report);
         if (sent !== null) { report.problems.push(`team chat ${chat.chatId}: ${sent}`); break; }
       }

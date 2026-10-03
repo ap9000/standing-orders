@@ -24,6 +24,7 @@ import { addApprover, approve, propose } from "./scope.js";
 import { bridgePass, createTransport, followBridge, hashPairingCode, mintPairingCode, PAIRING_TTL_MS, saveBotToken, TOKEN_ENV, type TelegramTransport, type TelegramUpload } from "./telegram.js";
 import { ceilingDigestOf, verifyApproverStanding } from "./principal.js";
 import { subscriptionCredentialKey } from "./converse.js";
+import { MATE_FAILURE_COPY, mateFailureText } from "./mate.js";
 import { knowledgeView } from './project-knowledge.js';
 import { mintSharedActionReview, prepareSharedAction } from './chat-actions.js';
 import { assignmentOf } from './assignment.js';
@@ -375,6 +376,30 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     expect(store.listTelegramConversations(BOT)).toHaveLength(1);
   });
 
+  test("the lead's voice on the phone: a tool turn gets one 👍 on the owner's message and typing; the reply is shaped, its bold and links sent as entities", async () => {
+    origin = "https://so.example.com";
+    answers.push(
+      { text: "Checking.", calls: [{ id: "q1", name: "list_tasks", args: {} }, { id: "q2", name: "list_repos", args: {} }] },
+      { text: "## Payout\n**Ready**: see https://so.example.com/chat?task=payout (run #4)." },
+    );
+    script.updates.push([textUpdate(2, "how is the payout fix?")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+    const reactions = script.calls.filter(call => call.method === "setMessageReaction");
+    expect(reactions).toHaveLength(1);
+    expect(reactions[0]!.params).toMatchObject({ message_id: 1002, reaction: [{ type: "emoji", emoji: "👍" }] });
+    expect(script.calls.filter(call => call.method === "sendChatAction").map(call => call.params["action"])).toContain("typing");
+    const reply = script.sends()[0]!;
+    expect(reply.params["text"]).toBe("Payout\nReady: see the task.");
+    expect(reply.params["entities"]).toEqual([{ type: "bold", offset: 7, length: 5 }, { type: "text_link", offset: 18, length: 8, url: "https://so.example.com/chat?task=payout" }]);
+    // A quick answer (no tool step) gets neither; the lead never reacts to its own messages.
+    answers.push({ text: "All quiet." });
+    script.updates.push([textUpdate(3, "anything else?")]);
+    expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1 } });
+    expect(script.calls.filter(call => call.method === "setMessageReaction")).toHaveLength(1);
+    expect(script.texts().at(-1)).toBe("All quiet.");
+    expect(script.sends().at(-1)!.params["entities"]).toBeUndefined();
+  });
+
   test("a teammate's question arrives with its options and Answer in words; a tap answers it once, a stale tap changes nothing, and a reply answers in words (v93)", async () => {
     const flow = store.createFlow({ repo, name: "Support", by: "alex", definitionJson: JSON.stringify({ version: 1, start: "inbox", stages: [{ id: "inbox", title: "Inbox", kind: "inbox", zone: {}, next: null, onFail: null }] }) }, now);
     const mate = store.createTeammate({ repo, handle: "maya", soul: TEAMMATE_TEMPLATES[0]!.soul, model: null, manager: "alex", by: "alex" }, now);
@@ -716,7 +741,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
     now = new Date(T0.getTime() + TURN_WALL_CLOCK_MS + CONVERSATION_CLAIM_MS + 60_000);
     expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1 } });
     expect(requests).toHaveLength(1);
-    expect(script.texts()).toEqual(["I couldn't answer that just now: the assistant's reply did not complete (crashed). Ask again, or open the console."]);
+    expect(script.texts()).toEqual([mateFailureText("crashed")]);
     expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "failed", outcome: "replayed:crashed" });
   });
 
@@ -860,7 +885,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       store.close(); store = openStore(file);
       later(CONVERSATION_CLAIM_MS + 1_000);
       expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });
-      expect(script.texts()).toEqual([long.slice(0, 3_900), long.slice(3_900)]);
+      expect(script.texts()).toEqual([long.slice(0, 3_900), long.trimEnd().slice(3_900)]);
       expect(parts().map(one => [one.state, one.messageId])).toEqual([["sent", "100"], ["sent", "101"]]);
       expect(row()).toMatchObject({ state: "done", outcome: "replayed", attempts: 2 });
       expect(requests).toHaveLength(1);
@@ -943,7 +968,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(await pass()).toMatchObject({ ok: true, report: { chatRefused: 1 } });
       expect(requests).toHaveLength(1);
       // Ending the session from the console superseded the running turn; that is the word the phone gets, not a silent restart.
-      expect(script.texts()).toEqual(["I couldn't answer that just now: the assistant's reply did not complete (superseded). Ask again, or open the console."]);
+      expect(script.texts()).toEqual([MATE_FAILURE_COPY.stopped]);
       expect(store.listTelegramConversations(BOT)[0]).toMatchObject({ state: "failed", outcome: "replayed:superseded", session: original.id });
       expect(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn").get()?.["n"]).toBe(1);
       expect(store.listTelegramConversationParts(store.listTelegramConversations(BOT)[0]!.id)).toEqual([]);
@@ -1707,7 +1732,7 @@ describe("Telegram conversation: the same chat, from the phone", () => {
       expect(Number(store.handle.prepare("SELECT COUNT(*) AS n FROM mate_turn_evidence").get()?.["n"])).toBe(0);
       expect(parts()).toEqual([]);
       expect(script.documents()).toHaveLength(0);
-      expect(script.texts().at(-1)).toMatch(/^I couldn't answer that just now: the assistant's reply did not complete \(.+\)\. Ask again, or open the console\.$/);
+      expect(script.texts().at(-1)).toBe(MATE_FAILURE_COPY.signIn);
       // The same ask, answered: the model is told which records cannot travel and why; only the verified image is sent.
       askForImages(run, "One screenshot follows; five saved captures could not be verified.");
       expect(await pass()).toMatchObject({ ok: true, report: { chatAnswered: 1, problems: [] } });

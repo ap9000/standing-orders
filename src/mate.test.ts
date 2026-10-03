@@ -4,7 +4,8 @@ import { fileTaskProposal } from "./proposal.js";
 import { propose } from "./scope.js";
 import { ceilingDigestOf, isVerifiedApprover, reproveApprover, verifyApproverStanding, type VerifiedApprover } from "./principal.js";
 import { MATE_MAX_STEPS, MATE_STEP_TEXT_CAP_BYTES, MATE_TOOL_CALL_CAP_BYTES, MATE_TOOL_RESULT_CAP_BYTES, MAX_OUTPUT_TOKENS, credentialKeyOf, mateWorstCaseForPrice, parseMateProviderWrapper, subscriptionCredentialKey } from "./converse.js";
-import { runMateTurn, historyFor, MATE_REFUSAL_COPY } from "./mate.js";
+import { runMateTurn, historyFor, MATE_FAILURE_COPY, MATE_REFUSAL_COPY } from "./mate.js";
+import { NOTHING_ATTACHED, deliverableClaim } from "./reply-shape.js";
 import { MATE_MAX_PROPOSALS_PER_TURN, executeMateTool, redactForMate } from "./mate-tools.js";
 import { MATE_CONTRACT, MATE_CONTRACT_VERSION } from "./mate-contract.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
@@ -157,7 +158,7 @@ describe("the mate's turn", () => {
     expect(result).toMatchObject({ ok: true, stoppedAtCap: true });
     if (!result.ok) throw Error("turn refused");
     expect(result.steps).toBeLessThan(8);
-    expect(result.reply).toContain("remaining allowance");
+    expect(result.reply).toContain("remaining spending allows");
     expect(store.getMateSession(live.id)!.ceilingMicrousd).toBe(5_000_000);
     expect(store.getMateTurn(result.turn)!.reservedMicrousd).toBeLessThanOrEqual(5_000_000);
   });
@@ -425,8 +426,46 @@ describe("the mate's turn", () => {
     expect(outcome).toMatchObject({ ok: true, steps: MATE_MAX_STEPS, stoppedAtCap: true });
     if (!outcome.ok) throw new Error("unreachable");
     if (outcome.replayed) throw new Error("unreachable replay");
-    expect(outcome.reply).toBe(`step ${MATE_MAX_STEPS}\n\n(stopped after ${MATE_MAX_STEPS} steps)`);
+    expect(outcome.reply).toBe(`step ${MATE_MAX_STEPS}\n\n(I stopped here: this answer needed more steps than one reply allows. Ask me to carry on.)`);
     expect(script.bodies).toHaveLength(MATE_MAX_STEPS);
+  });
+
+  test("chat error copy is plain: what happened, what it means and one next step, with no internal words", () => {
+    for (const words of [...Object.values(MATE_REFUSAL_COPY), ...Object.values(MATE_FAILURE_COPY)]) {
+      expect(words).not.toMatch(/\b(?:lease[sd]?|digests?|latch(?:ed)?|mint(?:ed)?|ceilings?|sessions?|reservations?|credentials?|dispatch(?:ed)?|this turn|turn #|steps?|superseded|malformed)\b/i);
+      expect(words.split(/(?<=[.!?])\s+/).length).toBeGreaterThanOrEqual(2);
+      expect(words).toMatch(/[.!?]$/);
+    }
+  });
+
+  describe("a reply that claims an attachment it does not carry", () => {
+    const reply = (outcome: Awaited<ReturnType<typeof runMateTurn>>): string => {
+      if (!outcome.ok || outcome.replayed) throw new Error("expected an answered turn");
+      return outcome.reply;
+    };
+    test("gets one repair step telling the lead to attach it or drop the claim", async () => {
+      const script = scripted([text("Here's the screenshot of the payout page."), text("That result has no screenshots saved yet. Open it to check the page yourself.")]);
+      const outcome = await turn("show me the payout page", script.fetcher);
+      expect(script.bodies).toHaveLength(2);
+      expect(script.bodies[1]).toContain("nothing is attached or linked this turn");
+      expect(reply(outcome)).toBe("That result has no screenshots saved yet. Open it to check the page yourself.");
+      expect(outcome).toMatchObject({ steps: 2 });
+    });
+    test("is never sent alone: a claim that survives the repair is dropped, said plainly once", async () => {
+      const script = scripted([text("Here's the screenshot."), text("The guard is fixed. I've attached the log. Sending the report now.")]);
+      const words = reply(await turn("did it work?", script.fetcher));
+      expect(script.bodies).toHaveLength(2);
+      expect(words).toBe(`The guard is fixed. ${NOTHING_ATTACHED}`);
+      expect(deliverableClaim(words)).toBeNull();
+    });
+    test("a claim the turn backs — a link in the reply, or a page shown — goes out as written, with no repair step", async () => {
+      const linked = scripted([text("Here's the link to the task: https://so.example.com/chat?task=in-1")]);
+      expect(reply(await turn("link me the task", linked.fetcher))).toBe("Here's the link to the task: https://so.example.com/chat?task=in-1");
+      expect(linked.bodies).toHaveLength(1);
+      const shown = scripted([answer([{ type: "text", text: "Opening it." }, call("show_control", { control: "settings" })]), text("Here's the link to Settings.")]);
+      expect(reply(await turn("where are settings?", shown.fetcher))).toBe("Here's the link to Settings.");
+      expect(shown.bodies).toHaveLength(2);
+    });
   });
 
   test("a malformed reply mid-loop charges the WHOLE reservation to both ledgers, latches, and acknowledging refunds nothing", async () => {

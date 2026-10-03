@@ -46,6 +46,7 @@ import type { ReviewSnapshot } from "./chat-review.js";
 import { composeSubscriptionMatePrompt, performSubscriptionMateRequest, type SubscriptionMateRunner } from "./subscription-chat.js";
 import { leadContext, type LeadChannel } from './lead-context.js';
 import { envValue } from "./names.js";
+import { deliverableClaim, deliverableRepair, dropDeliverableClaims, replyCarriesDeliverable } from "./reply-shape.js";
 
 export const MATE_MESSAGE_MAX_CHARS = 2_000;
 /** Where a promise made this turn is reported: the chat app it arrived on, or this conversation for the console and terminal. */
@@ -160,6 +161,40 @@ export const MATE_REFUSAL_COPY: Record<MateRefusal, string> = {
   "request-changed": "That send was already received with different text or task context. Reload the conversation before sending a new message.",
   channel: "This conversation's connection changed, so the message wasn't sent. Reconnect it, then send again.",
 };
+
+/** Why a reply did not finish, in the same three parts: what happened, what it means, one next step. */
+export const MATE_FAILURE_COPY = {
+  stopped: "This reply was stopped before it finished, from another window or by a newer message. Nothing it proposed was kept. Send your message again if you still need an answer.",
+  ended: "Your sign-in or this conversation ended while the lead was answering. Nothing it proposed was kept. Sign in again or start a new chat, then send your message again.",
+  tooLong: "The reply took too long and was stopped. Nothing it proposed was kept. Send your message again, or ask for less at once.",
+  secretRead: "Something the lead read looked like a password or key, so it stopped before sending it anywhere. Nothing was kept. Remove the password or key from that task or note, then ask again.",
+  secretReply: "The lead's reply contained something that looked like a password or key, so it was thrown away. Nothing was kept. Ask again, without asking for a password or key.",
+  paused: "An earlier reply stopped before its cost was known, so chat is paused. This message wasn't answered. Confirm that earlier reply on the Chat page, then send again.",
+  notStarted: "The reply couldn't be started. Nothing was kept or charged. Send your message again.",
+  notInstalled: "The chat app the lead uses isn't installed on this computer, so it couldn't answer. Nothing was kept. Install it, or choose another provider in Settings → Lead.",
+  unreadable: "The chat provider sent back an answer that couldn't be read, so it was thrown away. Nothing was kept. Send your message again.",
+  signIn: "The chat provider couldn't answer; its sign-in may have expired. Nothing was kept. Sign in to it again on this computer, then send your message again.",
+  refused: "The chat provider turned the request down. Nothing was kept or charged. Try again in a minute; if it keeps happening, check the provider in Settings → Lead.",
+  tooLongUnknownCost: "The reply took too long and was stopped, and its cost isn't known yet, so chat is paused. Nothing it proposed was kept. Confirm the cost on the Chat page to turn chat back on.",
+  lostUnknownCost: "The chat provider stopped responding partway through, and the cost isn't known, so chat is paused. Nothing it proposed was kept. Confirm the cost on the Chat page to turn chat back on.",
+  unreadableUnknownCost: "The chat provider sent back an answer that couldn't be read, and its cost isn't known, so chat is paused. Nothing it proposed was kept. Confirm the cost on the Chat page to turn chat back on.",
+  empty: "The lead sent back an empty answer. Nothing was kept. Send your message again.",
+  unusable: "The lead's answer couldn't be used, so it was thrown away. Nothing was kept. Send your message again.",
+} as const;
+
+/** A failed turn's saved reason as plain words, for a surface that reads the turn back later (a restart, a delivery retry). */
+export function mateFailureText(reason: string | null): string {
+  switch (reason) {
+    case "timeout": return MATE_FAILURE_COPY.tooLong;
+    case "malformed-reply": return MATE_FAILURE_COPY.unreadable;
+    case "secret-refused": return MATE_FAILURE_COPY.secretReply;
+    case "latched": return MATE_FAILURE_COPY.paused;
+    case "revoked": return MATE_FAILURE_COPY.ended;
+    case "superseded": return MATE_FAILURE_COPY.stopped;
+    case "provider-error": return MATE_FAILURE_COPY.refused;
+    default: return "The lead's reply didn't finish. Nothing it proposed was kept. Send your message again.";
+  }
+}
 
 const READ_TOOLS = new Set(["get_brief", "get_project_context", "get_actions", "get_action_status", "get_skills", "get_acceptance_evidence", "recap", "list_repos", "list_tasks", "get_task", "get_result", "get_result_images", "get_controls", "get_agents", "get_project_knowledge", "get_task_conversation", "get_diff", "get_check_log", "get_project_tools", "get_flows", "get_flow_insights", "list_decisions", "get_decision", "queue"]);
 
@@ -356,13 +391,13 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   // The channel lookup can await external state. Re-read all local authority
   // AFTER it resolves, immediately before sending context or using a tool.
   const guard = (channel: { ok: true } | { ok: false; reason: string }): MateTurnOutcome | null => {
-    if (!stillOurs()) return { ok: false, turn: turnId, failed: "superseded", message: "this turn was ended before its next action", unknownSpend: false };
-    if (!channel.ok) return fail("revoked", `this conversation's connection changed (${channel.reason}) — nothing it proposed was kept`, false);
+    if (!stillOurs()) return { ok: false, turn: turnId, failed: "superseded", message: MATE_FAILURE_COPY.stopped, unknownSpend: false };
+    if (!channel.ok) return fail("revoked", `This chat's connection changed (${channel.reason}), so the reply was stopped. Nothing it proposed was kept. Reconnect the chat, then send your message again.`, false);
     const standing = reproveApprover(store, who);
     const liveSession = store.getMateSession(session.id);
     const liveThread = store.getMateThread(thread.id);
     if (!standing.ok || liveSession === null || liveSession.endedAt !== null || liveThread === null || liveThread.closedAt !== null) {
-      return fail("revoked", "your standing or this conversation ended — nothing it proposed was kept", false);
+      return fail("revoked", MATE_FAILURE_COPY.ended, false);
     }
     return null;
   };
@@ -370,28 +405,37 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   let reply: string | null = null;
   let stoppedAtCap = false;
   let lastText = "";
+  /** A page shown this turn (show_control): a reply may say it links one. */
+  let shownControl = false;
+  /** The turn's one repair step for a reply that claims an attachment it does not carry. */
+  let repaired = false;
+  const unbacked = (text: string): string | null => {
+    const claim = deliverableClaim(text);
+    if (claim === null || shownControl || replyCarriesDeliverable(text) || store.listMateTurnEvidence(turnId).length > 0) return null;
+    return claim;
+  };
   while (steps < maxSteps) {
     const blocked = guard(input.revalidate === undefined ? { ok: true } : await input.revalidate());
     if (blocked !== null) return blocked;
     now = clock();
     const remainingMs = TURN_WALL_CLOCK_MS - (now.getTime() - turnStartedAt);
-    if (remainingMs <= 0) return fail("timeout", "the turn ran out of time before the model finished", false);
+    if (remainingMs <= 0) return fail("timeout", MATE_FAILURE_COPY.tooLong, false);
     const request = direct ? composeDirect(input.key as string) : composeSubscription();
     // Tool results join the outbound body: scanned again before every dispatch.
     const outbound = typeof request === "string" ? request : request.body;
     if (scanForSecrets(outbound).length > 0) {
-      return fail("secret-refused", "a tool result contained something credential-shaped — the turn stopped before sending it", false);
+      return fail("secret-refused", MATE_FAILURE_COPY.secretRead, false);
     }
     const step = store.openMateStep(
       { mateTurn: turnId, generation: started.generation, approver: who.name, credentialKey, provider: config.provider, model: config.model, deadlineMs: remainingMs + 10_000 },
       now,
     );
     if (!step.ok) {
-      if (step.reason === "latched") return fail("latched", "an earlier reply stopped before its cost was known, so chat is paused — acknowledge that reply on the Chat page, then send again", false);
-      return { ok: false, turn: turnId, failed: "superseded", message: "this turn was ended before its next step", unknownSpend: false };
+      if (step.reason === "latched") return fail("latched", MATE_FAILURE_COPY.paused, false);
+      return { ok: false, turn: turnId, failed: "superseded", message: MATE_FAILURE_COPY.stopped, unknownSpend: false };
     }
     const stepStarted = store.startChatTurn(step.id, now);
-    if (!stepStarted.ok) return fail("provider-error", "the step could not be dispatched", false);
+    if (!stepStarted.ok) return fail("provider-error", MATE_FAILURE_COPY.notStarted, false);
     steps++;
     progress({ kind: "step", turn: turnId, step: steps });
     const requestBytes = Buffer.byteLength(outbound, "utf8");
@@ -432,36 +476,36 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
         finishStep({ state: "failed", failureReason: result.problem === "timeout" ? "timeout" : result.problem === "malformed-reply" ? "malformed-reply" : "provider-error", settledMicrousd: 0 });
         const message =
           result.problem === "not-found"
-            ? "the selected subscription CLI is not installed on this machine"
+            ? MATE_FAILURE_COPY.notInstalled
             : result.problem === "timeout"
-              ? "the subscription turn ran out of time"
+              ? MATE_FAILURE_COPY.tooLong
               : result.problem === "malformed-reply"
-                ? "the subscription provider returned a malformed answer and it was discarded"
-                : "the subscription provider refused or could not complete the turn — check its login in the terminal";
+                ? MATE_FAILURE_COPY.unreadable
+                : MATE_FAILURE_COPY.signIn;
         return fail(result.problem === "timeout" ? "timeout" : result.problem === "malformed-reply" ? "malformed-reply" : "provider-error", message, false);
       }
       if (result.problem.startsWith("status-")) {
         // The provider ANSWERED with an error: nothing billed for this step.
         finishStep({ state: "failed", failureReason: "provider-error", settledMicrousd: 0 });
-        return fail("provider-error", "the provider refused the request — nothing was billed for that step", false);
+        return fail("provider-error", MATE_FAILURE_COPY.refused, false);
       }
       if (result.problem === "timeout") {
         finishStep({ state: "failed", failureReason: "timeout", settledMicrousd: null, unknownSpend: true });
-        return fail("timeout", "the turn timed out; that step's cost is unknown — the whole reservation is charged and the credential is blocked until you acknowledge it", true);
+        return fail("timeout", MATE_FAILURE_COPY.tooLongUnknownCost, true);
       }
       if (result.problem === "network") {
         finishStep({ state: "failed", failureReason: "provider-error", settledMicrousd: null, unknownSpend: true });
-        return fail("provider-error", "the provider could not be reached after dispatch; cost unknown — the whole reservation is charged; acknowledge to re-enable chat", true);
+        return fail("provider-error", MATE_FAILURE_COPY.lostUnknownCost, true);
       }
       finishStep({ state: "failed", failureReason: "malformed-reply", settledMicrousd: null, unknownSpend: true });
-      return fail("malformed-reply", "the provider's response was malformed and was discarded; cost unknown — the whole reservation is charged; acknowledge to re-enable chat", true);
+      return fail("malformed-reply", MATE_FAILURE_COPY.unreadableUnknownCost, true);
     }
     const answer = result.answer;
     // Usage that cannot be true — more input tokens than bytes sent — is a
     // malformed reply with unknown cost, never a number to settle by.
     if (direct && answer.tokensIn > requestBytes) {
       finishStep({ state: "failed", failureReason: "malformed-reply", settledMicrousd: null, unknownSpend: true });
-      return fail("malformed-reply", "the provider reported usage that cannot be true; cost unknown — the whole reservation is charged; acknowledge to re-enable chat", true);
+      return fail("malformed-reply", MATE_FAILURE_COPY.unreadableUnknownCost, true);
     }
     // The pinned math, or the provider's own reported charge when HIGHER.
     const stepSettled = direct
@@ -480,13 +524,21 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
     if (changed !== null) return changed;
 
     if (answer.calls.length === 0) {
-      if (answer.text.trim() === "") return fail("malformed-reply", "the model answered with nothing", false);
-      reply = answer.text;
+      if (answer.text.trim() === "") return fail("malformed-reply", MATE_FAILURE_COPY.empty, false);
+      // "Here's the screenshot" with nothing attached or linked: one repair step to attach it or drop the claim; never the claim alone.
+      const claim = unbacked(answer.text);
+      if (claim !== null && !repaired && steps < maxSteps) {
+        repaired = true;
+        history.push({ role: "assistant", text: answer.text, calls: [] });
+        history.push({ role: "operator", text: deliverableRepair(claim) });
+        continue;
+      }
+      reply = claim === null ? answer.text : dropDeliverableClaims(answer.text);
       break;
     }
-    if (answer.calls.length > MATE_MAX_CALLS_PER_STEP) return fail("malformed-reply", "the model asked for more tool calls than one step allows", false);
+    if (answer.calls.length > MATE_MAX_CALLS_PER_STEP) return fail("malformed-reply", MATE_FAILURE_COPY.unusable, false);
     for (const call of answer.calls) {
-      if (!isMateTool(call.name)) return fail("malformed-reply", "the model called a tool that does not exist", false);
+      if (!isMateTool(call.name)) return fail("malformed-reply", MATE_FAILURE_COPY.unusable, false);
     }
     history.push({ role: "assistant", text: answer.text, calls: answer.calls });
     for (const [index, call] of answer.calls.entries()) {
@@ -497,6 +549,7 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
       progress({ kind: "tool", turn: turnId, step: steps, label: mateToolLabel(call.name) });
       const outcome = executeMateTool({ store, who, now: clock(), draft, selectEvidence, step: steps, readDecisions, readResults, searchedMemory, ask, ...(input.integrations === undefined ? {} : { integrations: input.integrations }), thread: thread.id, turn: turnId, ...(promiseChannelOfTurn(input.channel) === undefined ? {} : { channel: promiseChannelOfTurn(input.channel)! }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), ...(input.mediaDelivery === undefined ? {} : { mediaDelivery: input.mediaDelivery }) }, call.name, call.args, view);
       if (READ_TOOLS.has(call.name)) reads++;
+      if (call.name === "show_control" && outcome.ok) shownControl = true;
       // Opt-in, local diagnostics for end-to-end runs: what the lead asked of each tool and what came back (its start), keys
       // blanked. Each line stays whole JSON so a run can assert on what a tool returned rather than on the model's words.
       if (envValue(process.env, "MATE_TRACE") === "1") {
@@ -510,15 +563,16 @@ export async function runMateTurn(input: MateTurnInput): Promise<MateTurnOutcome
   }
   if (reply === null) {
     stoppedAtCap = true;
-    reply = `${lastText.trim() === "" ? "" : `${lastText.trim()}\n\n`}(stopped after ${maxSteps} steps${maxSteps < MATE_MAX_STEPS ? " within this conversation’s remaining allowance" : ""})`;
+    const last = lastText.trim() === "" || unbacked(lastText) === null ? lastText.trim() : dropDeliverableClaims(lastText);
+    reply = `${last === "" ? "" : `${last}\n\n`}(I stopped here: this answer needed more steps than ${maxSteps < MATE_MAX_STEPS ? "this conversation's remaining spending allows" : "one reply allows"}. Ask me to carry on.)`;
   }
   // Ruling 11: model text is scanned before it becomes durable.
-  if (scanForSecrets(reply).length > 0) return fail("secret-refused", "the model's reply contained something credential-shaped and was discarded", false);
+  if (scanForSecrets(reply).length > 0) return fail("secret-refused", MATE_FAILURE_COPY.secretReply, false);
 
   now = clock();
   const activity = activitySummary(reads, proposals, steps);
   // One write (finding 12): settle, debit, promote the drafts, append the assistant text.
   const finalized = store.finalizeMateTurn(turnId, started.generation, { state: "answered", settledMicrousd: settled, tokensIn, tokensOut, message: { text: reply, activity } }, now);
-  if (!finalized) return { ok: false, turn: turnId, failed: "superseded", message: "this turn was ended before it could be kept", unknownSpend: false };
+  if (!finalized) return { ok: false, turn: turnId, failed: "superseded", message: MATE_FAILURE_COPY.stopped, unknownSpend: false };
   return { ok: true, turn: turnId, reply, activity, proposals, steps, stoppedAtCap, settledMicrousd: settled };
 }

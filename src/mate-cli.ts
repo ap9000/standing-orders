@@ -14,6 +14,7 @@ import { MATE_ASK_OTHER, type ChatConfig, type DirectChatProviderId, type MatePr
 import { CHAT_KEY_ENV, credentialKeyOf, isDirectChatProvider, priceForConfig, subscriptionCredentialKey } from "./converse.js";
 import { verifyApproverByPassword, type VerifiedApprover } from "./principal.js";
 import { runMateTurn, type MateTurnOutcome } from "./mate.js";
+import { voiceReply } from "./reply-shape.js";
 import { confirmMateProposal, dismissMateProposal } from "./mate-doors.js";
 import { projectName } from "./project.js";
 import type { SubscriptionMateRunner } from "./subscription-chat.js";
@@ -180,7 +181,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   const key = direct ? keyFor(config as ChatConfig & { provider: DirectChatProviderId }, input.databaseFile, env) : null;
   if (direct && key === null) return refuse("no-key", `no ${directProvider} key — export ${CHAT_KEY_ENV[directProvider]}, or paste one on the console's chat page`);
   const repos = [...input.repos];
-  if (repos.length === 0) return refuse("empty-ceiling", "the mate needs projects to see — name them with --repo, or enroll some in the console", MATE_CLI_EXIT.usage);
+  if (repos.length === 0) return refuse("empty-ceiling", "The lead has no projects to look at. Name some with --repo, or add projects in the console.", MATE_CLI_EXIT.usage);
 
   const verified = verifyApproverByPassword(store, input.credentials.name, input.credentials.token, repos);
   if (!verified.ok) return refuse("unauthenticated", "that is not an approver, or the password does not match");
@@ -192,7 +193,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
     const sessions = store.endMateSessionsFor(who.name, who.name, now);
     const threads = store.closeMateThreadsFor(who.name, now);
     emit({ ok: true, ended: { sessions, threads, turns } });
-    say(sessions === 0 ? "no mate session was live; the thread is gone" : "the session is over and the thread is forgotten");
+    say(sessions === 0 ? "No conversation was open, so there was nothing to end." : "The conversation has ended and its history is forgotten.");
     return { code: MATE_CLI_EXIT.ok };
   }
 
@@ -202,12 +203,12 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   if (session !== null && session.credentialKey !== credentialKey) {
     // A session minted under another provider key cannot be spent by this
     // one (slice-2 review, finding 9): say so, never loop on `not-yours`.
-    return refuse("key-mismatch", "the live mate session was minted under a different provider key — use that key, or end the session with --end and mint a new one");
+    return refuse("key-mismatch", "The open conversation was started with a different provider key. Use that key, or end it with --end and start a new one.");
   }
   if (session !== null && session.ceilingDigest !== who.ceilingDigest) {
     store.endMateSession(session.id, who.name, now);
     store.closeMateThreadsFor(who.name, now);
-    say("the projects named differ from the live session's — that session ended; minting a new one");
+    say("The projects you named differ from the open conversation's, so it ended. Starting a new one.");
     session = null;
   }
   if (session === null) {
@@ -220,12 +221,12 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
       now,
     );
     session = store.getMateSession(id);
-    if (session === null) return refuse("failed", "the session could not be minted", MATE_CLI_EXIT.failed);
+    if (session === null) return refuse("failed", "A new conversation couldn't be started. Try again.", MATE_CLI_EXIT.failed);
     if (!direct && input.ceilingUsd !== undefined) say("the supplied --ceiling-usd value is ignored for membership usage");
-    say(`mate conversation started: ${direct ? `up to ${money(ceilingMicrousd)}` : "subscription usage (no dollar ceiling)"} over ${repos.map((one, index) => `r${index + 1} ${projectName(one)}`).join(", ")} — live until you end it`);
-    if (direct) say(`(the weekly chat ceiling, ${money(config.weeklyCeilingMicrousd)}, still binds above it)`);
+    say(`mate conversation started: ${direct ? `up to ${money(ceilingMicrousd)}` : "subscription usage (no dollar limit)"} over ${repos.map(one => projectName(one)).join(", ")} — live until you end it`);
+    if (direct) say(`(the weekly chat limit, ${money(config.weeklyCeilingMicrousd)}, still applies)`);
   } else {
-    say(`mate conversation live: ${direct ? `${money(session.spentMicrousd)} of ${money(session.ceilingMicrousd)} spent` : "subscription usage (no dollar ceiling)"} — live until you end it`);
+    say(`mate conversation live: ${direct ? `${money(session.spentMicrousd)} of ${money(session.ceilingMicrousd)} spent` : "subscription usage (no dollar limit)"} — live until you end it`);
   }
   const thread = store.openMateThread(who.name, who.ceilingDigest, now).thread;
   if (input.follow !== undefined) {
@@ -261,12 +262,12 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
   const turn = async (message: string): Promise<MateTurnOutcome> => {
     const live = store.activeMateSession(who.name);
     if (live === null) {
-      const outcome: MateTurnOutcome = { ok: false, refused: "session-ended", message: "this mate session has ended — run chat again to mint one" };
+      const outcome: MateTurnOutcome = { ok: false, refused: "session-ended", message: "This conversation has ended. Run chat again to start a new one." };
       return outcome;
     }
     return runMateTurn({ store, who, session: live, thread, config, key, message, channel: "terminal", ...(seams.fetcher === undefined ? {} : { fetcher: seams.fetcher }), ...(seams.subscriptionRunner === undefined ? {} : { subscriptionRunner: seams.subscriptionRunner }), ...(input.evidenceRoot === undefined ? {} : { evidenceRoot: input.evidenceRoot }), clock });
   };
-  const report = (outcome: MateTurnOutcome): void => {
+  const report = (outcome: MateTurnOutcome, message?: string): void => {
     if (outcome.ok && outcome.replayed) {
       emit(outcome);
       say(`Message already received as turn #${outcome.turn}.`);
@@ -277,7 +278,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
       emit({ ok: true, turn: outcome.turn, reply: outcome.reply, activity: outcome.activity, steps: outcome.steps, settledMicrousd: outcome.settledMicrousd, proposals: pendingProposals().map(one => ({ id: one.id, ordinal: ordinalOf(one), kind: one.kind, payload: one.payload })),
         ...(ask === null ? {} : { ask: { question: ask.question, options: [...ask.options, MATE_ASK_OTHER] } }) });
       say(`  ${outcome.activity}`);
-      say(outcome.reply);
+      say(voiceReply(outcome.reply, "terminal", message === undefined ? {} : { asked: message }));
       // The lead's question: the terminal has no buttons, so the options are listed to type back.
       if (ask !== null) say(`${ask.question}\n${ask.options.map(one => `  · ${one}`).join("\n")}\n  · ${MATE_ASK_OTHER} (type your answer)`);
       printProposals();
@@ -289,7 +290,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
 
   if (input.say !== undefined) {
     const outcome = await turn(input.say);
-    report(outcome);
+    report(outcome, input.say);
     return { code: outcome.ok ? MATE_CLI_EXIT.ok : MATE_CLI_EXIT.refused };
   }
 
@@ -351,7 +352,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
       store.failLiveMateTurnsFor(who.name, "ended", now);
       store.endMateSessionsFor(who.name, who.name, now);
       store.closeMateThreadsFor(who.name, now);
-      say("the session is over and the thread is forgotten");
+      say("The conversation has ended and its history is forgotten.");
       emit({ ok: true, ended: true });
       return { code: MATE_CLI_EXIT.ok };
     }
@@ -359,7 +360,7 @@ export async function runMateCli(input: MateCliInput): Promise<MateCliResult> {
       say("say something, or: proposals · confirm N · dismiss N · open N · end · quit");
       continue;
     }
-    report(await turn(line));
+    report(await turn(line), line);
   }
   return { code: MATE_CLI_EXIT.ok };
 }

@@ -181,6 +181,8 @@ export type ChatContent = {
   question?: { id: number; choices: Array<{ choice: string | null; label: string }> };
   /** The lead's question to its owner rides this part: its options, then "Something else". */
   ask?: { turn: number; options: string[] };
+  /** The lead's own reply, already shaped (reply-shape.ts): the channel renders its bold anchors and labelled links in its own format. */
+  voice?: true;
 };
 export const chatHash = (text: string): string =>
   createHash("sha256").update(text).digest("hex");

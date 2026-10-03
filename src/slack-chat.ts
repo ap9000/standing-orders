@@ -20,6 +20,7 @@ import {
   armedYesLabel,
 } from "./chat-channel.js";
 import { MATE_MESSAGE_MAX_CHARS } from "./mate.js";
+import { renderReply } from "./reply-shape.js";
 import { type DoorOptions } from "./mate-doors.js";
 import {
   SlackState,
@@ -204,6 +205,10 @@ const delivery = (options: SlackChatOptions): ChatDeliveryOptions => ({
   label: "Slack",
   member: (member, channel) =>
     slackMember(options.api, options.identity, member, channel),
+  // A 👍 on the owner's message where the app has reactions:write; Slack shows bots no typing indicator.
+  warm: (event) => ({
+    react: () => options.api("reactions.add", { channel: event.channel, timestamp: event.ts, name: "thumbsup" }),
+  }),
 });
 export const processSlackEvent = (options: SlackChatOptions) =>
   processChatEvent(delivery(options));
@@ -241,6 +246,18 @@ export function slackBlocks(
       type: "section",
       text: { type: "plain_text", text: part, emoji: true },
     });
+  if (buttons.length) blocks.push({ type: "actions", elements: buttons });
+  return blocks;
+}
+/** The lead's reply as mrkdwn sections: no header block, so its first line stays an ordinary line. */
+export function slackVoiceBlocks(
+  mrkdwn: string,
+  buttons: Record<string, unknown>[] = [],
+): Record<string, unknown>[] {
+  const blocks: Record<string, unknown>[] = split(mrkdwn).map((part) => ({
+    type: "section",
+    text: { type: "mrkdwn", text: part },
+  }));
   if (buttons.length) blocks.push({ type: "actions", elements: buttons });
   return blocks;
 }
@@ -535,14 +552,16 @@ export async function deliverSlackPart(
         ...(content.also ?? []).flatMap((one, index) => linkButton(options.origin(), one).map(button => ({ ...button, action_id: `toolroll_link_${index + 2}` }))),
       ];
     const target = content.edit ?? row.message;
+    // The lead's own reply goes out in Slack's mrkdwn (bold anchors, labelled links); everything else stays plain.
+    const voiced = content.voice === true && !content.proposal && !content.image ? renderReply(text, "slack") : null;
     const args = {
       channel: destination,
-      text: text
+      text: voiced ?? text
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;"),
-      blocks: slackBlocks(text, buttons),
-      mrkdwn: false,
+      blocks: voiced === null ? slackBlocks(text, buttons) : slackVoiceBlocks(voiced, buttons),
+      mrkdwn: voiced !== null,
       parse: "none",
       unfurl_links: false,
       unfurl_media: false,

@@ -432,6 +432,38 @@ describe("Slack shared chat", () => {
     expect(asked()).not.toContain("Current task");
     expect(lastPart().task).toBeUndefined();
   });
+  test("the lead's voice in Slack: a tool turn gets one :thumbsup: on the owner's message; the reply goes out as mrkdwn with no header, a labelled link and no internal ids", async () => {
+    answers.push(
+      { text: "Checking.", calls: [{ id: "q1", name: "list_tasks", args: {} }] },
+      { text: "## Payout\n**Ready**: see https://console.example/chat?task=payout (run #4)." },
+    );
+    receive("how is the payout fix?");
+    await processSlackEvent(options);
+    await drain();
+    const reactions = calls.filter((c) => c.method === "reactions.add");
+    expect(reactions).toEqual([{ method: "reactions.add", args: { channel: CHANNEL, timestamp: TS, name: "thumbsup" } }]);
+    const reply = sends().at(-1)!.args;
+    expect(reply).toMatchObject({ mrkdwn: true, text: "Payout\n*Ready*: see <https://console.example/chat?task=payout|the task>." });
+    expect(reply.blocks).toEqual([{ type: "section", text: { type: "mrkdwn", text: "Payout\n*Ready*: see <https://console.example/chat?task=payout|the task>." } }]);
+    // No permission for reactions: skipped silently, and the reply still goes out; a quick answer gets no reaction.
+    const base = options.api;
+    options.api = async (method, args) => {
+      if (method === "reactions.add") throw new SlackError("missing_scope");
+      return base(method, args);
+    };
+    answers.push({ text: "Checking.", calls: [{ id: "q2", name: "list_tasks", args: {} }] }, { text: "All quiet." });
+    receive("anything else?");
+    await processSlackEvent(options);
+    await drain();
+    expect(sends().at(-1)!.args.text).toBe("All quiet.");
+    options.api = base;
+    answers.push({ text: "Still quiet." });
+    receive("and now?");
+    await processSlackEvent(options);
+    await drain();
+    expect(calls.filter((c) => c.method === "reactions.add")).toHaveLength(1);
+  });
+
   test("one request survives duplicate events and reply delivery loss without a second model turn", async () => {
     const body = message("What needs my attention?");
     answers.push({ text: "No task needs your attention." });
